@@ -8,6 +8,8 @@ Addon.connected = false
 Addon.sessionId = nil
 Addon.requestId = 0
 Addon.pendingLists = {}
+Addon.protocolVersion = VERSION
+Addon.lastProtocolMessage = "none"
 
 local function Split(message)
     local values = {}
@@ -40,6 +42,7 @@ function Addon:NextRequestId()
 end
 
 function Addon:Hello()
+    self.lastProtocolMessage = "HELLO sent"
     self:Send("HELLO\t" .. VERSION)
 end
 
@@ -112,9 +115,11 @@ end
 function Addon:HandleProtocolMessage(message)
     local parts = Split(message)
     local command = parts[1]
+    self.lastProtocolMessage = command or "unknown"
 
     if command == "HELLO_OK" then
         self.connected = tonumber(parts[2]) == VERSION
+        self.helloAcknowledged = self.connected
         return
     end
 
@@ -207,7 +212,12 @@ function Addon:HandleProtocolMessage(message)
 end
 
 function Addon:OnAddonMessage(prefix, message, channel, sender)
-    if prefix ~= PREFIX or sender ~= UnitName("player") then
+    if prefix ~= PREFIX or channel ~= "WHISPER" then
+        return
+    end
+
+    local shortSender = sender and string.match(sender, "^[^-]+")
+    if shortSender and shortSender ~= UnitName("player") then
         return
     end
     self:HandleProtocolMessage(message)
