@@ -8,6 +8,7 @@ Addon.connected = false
 Addon.sessionId = nil
 Addon.requestId = 0
 Addon.pendingLists = {}
+Addon.transmogSlots = {}
 Addon.protocolVersion = VERSION
 Addon.lastProtocolMessage = "none"
 
@@ -70,6 +71,7 @@ function Addon:Apply(slot, itemEntry)
     end
     local requestId = self:NextRequestId()
     self.UI:SetBusy(true)
+    self.UI:SetStatus(ACoreTransmogLocale.APPLYING, 1, 0.82, 0)
     self:Send(string.format("APPLY\t%d\t%d\t%d\t%d", requestId, self.sessionId, slot, itemEntry))
 end
 
@@ -141,6 +143,26 @@ function Addon:HandleProtocolMessage(message)
         return
     end
 
+    if command == "SLOTS" then
+        self.transmogSlots = {}
+        if parts[2] and parts[2] ~= "" then
+            for value in string.gmatch(parts[2], "[^,]+") do
+                local separator = string.find(value, ":", 1, true)
+                if separator then
+                    local slot = tonumber(string.sub(value, 1, separator - 1))
+                    local itemEntry = tonumber(string.sub(value, separator + 1))
+                    if slot and itemEntry then
+                        self.transmogSlots[slot] = itemEntry
+                    end
+                end
+            end
+        end
+        if self.UI then
+            self.UI:UpdateTransmogSlotMarkers()
+        end
+        return
+    end
+
     if command == "PAGE" then
         local requestId = tonumber(parts[2])
         local pending = self.pendingLists[requestId]
@@ -202,8 +224,13 @@ function Addon:HandleProtocolMessage(message)
         end
         self.UI:SetBusy(false)
         if parts[3] == "OK" then
+            local slot = tonumber(parts[4])
             local itemEntry = tonumber(parts[5]) or 0
-            self.UI:SetStatus(itemEntry == 0 and ACoreTransmogLocale.REMOVED or ACoreTransmogLocale.APPLIED, 0.3, 1, 0.3)
+            if slot then
+                self.transmogSlots[slot] = itemEntry ~= 0 and itemEntry or nil
+                self.UI:UpdateTransmogSlotMarkers()
+            end
+            self.UI.pendingResultStatus = itemEntry == 0 and ACoreTransmogLocale.REMOVED or ACoreTransmogLocale.APPLIED
             self.UI:RefreshCurrentPage()
         else
             local errorCode = parts[4]

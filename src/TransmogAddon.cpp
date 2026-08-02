@@ -153,6 +153,25 @@ void SendError(Player* player, uint32 requestId, std::string_view error)
     Send(player, "RESULT\t" + std::to_string(requestId) + "\tERROR\t" + std::string(error));
 }
 
+void SendSlotStates(Player* player)
+{
+    std::ostringstream states;
+    bool first = true;
+    for (uint8 slot = 0; slot < EQUIPMENT_SLOT_END; ++slot)
+    {
+        Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+        uint32 fakeEntry = item ? sTransmogrification->GetFakeEntry(item->GetGUID()) : 0;
+        if (!fakeEntry)
+            continue;
+
+        if (!first)
+            states << ',';
+        states << uint32(slot) << ':' << fakeEntry;
+        first = false;
+    }
+    Send(player, "SLOTS\t" + states.str());
+}
+
 void HandleHello(Player* player, std::vector<std::string> const& parts)
 {
     uint32 version = 0;
@@ -240,11 +259,10 @@ void HandleList(Player* player, std::vector<std::string> const& parts)
     auto collection = sTransmogrification->collectionCache.find(accountId);
     if (collection != sTransmogrification->collectionCache.end())
     {
-        uint32 current = sTransmogrification->GetFakeEntry(target->GetGUID());
         for (uint32 itemEntry : collection->second)
         {
             ItemTemplate const* appearance = sObjectMgr->GetItemTemplate(itemEntry);
-            if (!appearance || itemEntry == current)
+            if (!appearance)
                 continue;
             if (!sTransmogrification->CanTransmogrifyItemWithItem(player, target->GetTemplate(), appearance))
                 continue;
@@ -352,6 +370,7 @@ void HandleApply(Player* player, std::vector<std::string> const& parts)
     state->lastListAtMs = 0;
     Send(player, "RESULT\t" + std::to_string(requestId) + "\tOK\t" + std::to_string(slot) + "\t" +
         std::to_string(itemEntry) + "\t" + std::to_string(player->GetMoney()));
+    SendSlotStates(player);
 }
 
 void HandleRemove(Player* player, std::vector<std::string> const& parts)
@@ -401,6 +420,7 @@ void HandleRemove(Player* player, std::vector<std::string> const& parts)
     state->lastListAtMs = 0;
     Send(player, "RESULT\t" + std::to_string(requestId) + "\tOK\t" + std::to_string(slot) + "\t0\t" +
         std::to_string(player->GetMoney()));
+    SendSlotStates(player);
 }
 }
 
@@ -427,6 +447,7 @@ bool TryOpen(Player* player, Creature* creature)
     state.lastOperationAtMs = 0;
     state.completedOperations.clear();
     Send(player, "OPEN\t" + std::to_string(state.sessionId));
+    SendSlotStates(player);
     return true;
 }
 
