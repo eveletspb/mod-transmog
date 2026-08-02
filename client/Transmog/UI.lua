@@ -187,9 +187,12 @@ function UI:CreateItemButton(parent, index)
             return
         end
         UI.selectedEntry = self.itemEntry
-        Addon:PreviewItem(self.itemEntry)
         UI:UpdateSelection()
         UI:UpdateSelectedItemText()
+        local previewed, errorMessage = pcall(function() Addon:PreviewItem(self.itemEntry) end)
+        if not previewed then
+            DEFAULT_CHAT_FRAME:AddMessage("|cffff4040ACore Transmog preview error:|r " .. tostring(errorMessage))
+        end
     end)
     button:SetScript("OnDoubleClick", function(self)
         if self.itemEntry and UI.selectedSlot then
@@ -274,9 +277,9 @@ function UI:Create()
     modelBackground:SetPoint("TOPLEFT", 58, -42)
     modelBackground:SetPoint("BOTTOMRIGHT", -58, 45)
 
-    -- DressUpModel is the name of Blizzard's global frame, not a valid
-    -- CreateFrame type on the 3.3.5 client. PlayerModel exposes SetUnit/TryOn.
-    local model = CreateFrame("PlayerModel", "ACoreTransmogModel", previewPanel)
+    -- This HD 3.3.5 client exposes DressUpModel as a creatable frame type.
+    -- Unlike a generic PlayerModel, it provides the TryOn method.
+    local model = CreateFrame("DressUpModel", "ACoreTransmogModel", previewPanel)
     model:SetPoint("TOPLEFT", 53, -38)
     model:SetPoint("BOTTOMRIGHT", -53, 39)
     model:EnableMouse(true)
@@ -321,6 +324,17 @@ function UI:Create()
 
     local collectionPanel = CreatePanel(frame, COLLECTION_WIDTH, PANEL_HEIGHT)
     collectionPanel:SetPoint("TOPRIGHT", -18, -62)
+    collectionPanel:SetScript("OnUpdate", function(self, elapsed)
+        if not UI.hasMissingItemInfo or (UI.itemInfoRefreshAttempts or 0) >= 20 then
+            return
+        end
+        self.itemInfoElapsed = (self.itemInfoElapsed or 0) + elapsed
+        if self.itemInfoElapsed >= 0.5 then
+            self.itemInfoElapsed = 0
+            UI.itemInfoRefreshAttempts = (UI.itemInfoRefreshAttempts or 0) + 1
+            UI:RefreshItemInfo()
+        end
+    end)
 
     local collectionTitle = collectionPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     collectionTitle:SetPoint("TOPLEFT", 18, -14)
@@ -540,7 +554,7 @@ function UI:UpdateSelectedItemText()
         return
     end
 
-    local name, _, quality = GetItemInfo(self.selectedEntry)
+    local name, _, quality = GetItemInfo("item:" .. self.selectedEntry)
     local red, green, blue = GetQualityColor(quality)
     self.selectedText:SetText(name or ("#" .. self.selectedEntry))
     self.selectedText:SetTextColor(red, green, blue)
@@ -548,10 +562,15 @@ end
 
 function UI:RefreshItemInfo()
     if not self.itemButtons then return end
+    self.hasMissingItemInfo = false
     for _, button in ipairs(self.itemButtons) do
         if button.itemEntry then
-            local _, _, quality, _, _, _, _, _, _, texture = GetItemInfo(button.itemEntry)
-            if texture then button.icon:SetTexture(texture) end
+            local _, _, quality, _, _, _, _, _, _, texture = GetItemInfo("item:" .. button.itemEntry)
+            if texture then
+                button.icon:SetTexture(texture)
+            else
+                self.hasMissingItemInfo = true
+            end
             local red, green, blue = GetQualityColor(quality)
             for _, border in pairs(button.qualityOutline) do
                 border:SetTexture(red, green, blue, 1)
@@ -567,13 +586,16 @@ function UI:ShowPage(meta, items)
     self.pageCount = meta.pageCount
     self.currentEntry = meta.current
     self.selectedEntry = nil
+    self.hasMissingItemInfo = false
+    self.itemInfoRefreshAttempts = 0
 
     for index, button in ipairs(self.itemButtons) do
         local itemEntry = items[index]
         button.itemEntry = itemEntry
         if itemEntry then
-            local _, _, quality, _, _, _, _, _, _, texture = GetItemInfo(itemEntry)
+            local _, _, quality, _, _, _, _, _, _, texture = GetItemInfo("item:" .. itemEntry)
             button.icon:SetTexture(texture or "Interface\\Icons\\INV_Misc_QuestionMark")
+            if not texture then self.hasMissingItemInfo = true end
             local red, green, blue = GetQualityColor(quality)
             for _, border in pairs(button.qualityOutline) do
                 border:SetTexture(red, green, blue, 1)

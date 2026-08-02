@@ -15,6 +15,6 @@ function Addon:PreviewItem(itemEntry)
     end
 
     self:ResetPreview()
-    local _, link = GetItemInfo(itemEntry)
+    local _, link = GetItemInfo("item:" .. itemEntry)
     self.UI.model:TryOn(link or ("item:" .. itemEntry))
 end
