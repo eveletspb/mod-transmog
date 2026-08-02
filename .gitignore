@@ -48,4 +48,4 @@ local.properties
 .cproject
 
 # Local development context for Codex
-/docs/MODULE_CONTEXT.md
+/docs
