@@ -103,6 +103,11 @@ equipment slots, see the combined price, and apply the complete outfit in one
 validated server operation. Applied slots and unpublished draft changes use
 different highlights in the model panel.
 
+Players can also save the effective preview as a named outfit, load it back into
+the draft, rename it, or delete it. Saved outfits reuse the existing
+`custom_transmogrification_sets` table and the module's `EnableSets`/`MaxSets`
+configuration; no additional SQL migration is needed.
+
 Server configuration:
 
 ```ini

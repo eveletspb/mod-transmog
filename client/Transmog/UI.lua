@@ -46,6 +46,16 @@ StaticPopupDialogs["ACORE_TRANSMOG_REMOVE_ALL"] = {
     hideOnEscape = true,
 }
 
+StaticPopupDialogs["ACORE_TRANSMOG_DELETE_SET"] = {
+    text = L.DELETE_SET_CONFIRM,
+    button1 = YES,
+    button2 = NO,
+    OnAccept = function(_, presetId) Addon:DeleteSet(presetId) end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+}
+
 local function AddSolidTexture(parent, layer, red, green, blue, alpha)
     local texture = parent:CreateTexture(nil, layer or "BACKGROUND")
     texture:SetTexture(red, green, blue, alpha or 1)
@@ -269,6 +279,180 @@ function UI:CreateItemButton(parent, index)
     self.itemButtons[index] = button
 end
 
+function UI:CreateOutfitPanel(parent)
+    local panel = CreatePanel(parent, 420, 440)
+    panel:SetPoint("CENTER")
+    panel:SetFrameLevel(parent:GetFrameLevel() + 20)
+    panel:EnableMouse(true)
+    panel:Hide()
+
+    local title = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    title:SetPoint("TOPLEFT", 18, -18)
+    title:SetText(L.OUTFITS_TITLE)
+    title:SetTextColor(1, 0.82, 0.35)
+
+    local close = CreateFrame("Button", nil, panel, "UIPanelCloseButton")
+    close:SetPoint("TOPRIGHT", -5, -5)
+
+    local nameEdit = CreateFrame("EditBox", "ACoreTransmogSetName", panel, "InputBoxTemplate")
+    nameEdit:SetWidth(240)
+    nameEdit:SetHeight(26)
+    nameEdit:SetPoint("TOPLEFT", 22, -48)
+    nameEdit:SetAutoFocus(false)
+    nameEdit:SetMaxLetters(24)
+    nameEdit:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    nameEdit:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+
+    local nameHint = nameEdit:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    nameHint:SetPoint("LEFT", 7, 0)
+    nameHint:SetText(L.SET_NAME_HINT)
+    nameEdit.nameHint = nameHint
+    nameEdit:SetScript("OnTextChanged", function(self)
+        if self:GetText() == "" and not self:HasFocus() then self.nameHint:Show() else self.nameHint:Hide() end
+    end)
+    nameEdit:SetScript("OnEditFocusGained", function(self) self.nameHint:Hide() end)
+    nameEdit:SetScript("OnEditFocusLost", function(self)
+        if self:GetText() == "" then self.nameHint:Show() end
+    end)
+
+    local save = CreateButton(panel, L.SAVE_SET, 125, 25)
+    save:SetPoint("LEFT", nameEdit, "RIGHT", 12, 0)
+    save:SetScript("OnClick", function()
+        Addon:SaveSet(nameEdit:GetText())
+    end)
+
+    local empty = panel:CreateFontString(nil, "OVERLAY", "GameFontDisable")
+    empty:SetPoint("CENTER", 0, 5)
+    empty:SetText(L.SETS_EMPTY)
+
+    self.setRows = {}
+    for index = 1, 10 do
+        local row = CreateButton(panel, "", 376, 25)
+        row:SetPoint("TOP", 0, -86 - (index - 1) * 28)
+        row:SetScript("OnClick", function(button)
+            UI:SelectSavedSet(button.presetId)
+        end)
+        row:Hide()
+        self.setRows[index] = row
+    end
+
+    local count = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    count:SetPoint("BOTTOM", 0, 52)
+
+    local setPrevious = CreateButton(panel, "<", 30, 22)
+    setPrevious:SetPoint("RIGHT", count, "LEFT", -10, 0)
+    setPrevious:SetScript("OnClick", function()
+        UI.setPage = math.max(0, (UI.setPage or 0) - 1)
+        UI:RenderSavedSets()
+    end)
+
+    local setNext = CreateButton(panel, ">", 30, 22)
+    setNext:SetPoint("LEFT", count, "RIGHT", 10, 0)
+    setNext:SetScript("OnClick", function()
+        UI.setPage = (UI.setPage or 0) + 1
+        UI:RenderSavedSets()
+    end)
+
+    local load = CreateButton(panel, L.LOAD_SET, 105, 26)
+    load:SetPoint("BOTTOMLEFT", 22, 16)
+    load:SetScript("OnClick", function()
+        if UI.selectedSetId ~= nil and Addon:LoadSavedSet(UI.selectedSetId) then panel:Hide() end
+    end)
+
+    local rename = CreateButton(panel, L.RENAME_SET, 125, 26)
+    rename:SetPoint("LEFT", load, "RIGHT", 8, 0)
+    rename:SetScript("OnClick", function()
+        if UI.selectedSetId ~= nil then Addon:RenameSet(UI.selectedSetId, nameEdit:GetText()) end
+    end)
+
+    local delete = CreateButton(panel, L.DELETE_SET, 105, 26)
+    delete:SetPoint("LEFT", rename, "RIGHT", 8, 0)
+    delete:GetFontString():SetTextColor(1, 0.3, 0.3)
+    delete:SetScript("OnClick", function()
+        local savedSet = UI.selectedSetId ~= nil and Addon.savedSets[UI.selectedSetId]
+        if savedSet then StaticPopup_Show("ACORE_TRANSMOG_DELETE_SET", savedSet.name, nil, UI.selectedSetId) end
+    end)
+
+    self.outfitPanel = panel
+    self.setNameEdit = nameEdit
+    self.saveSet = save
+    self.loadSet = load
+    self.renameSet = rename
+    self.deleteSet = delete
+    self.setCount = count
+    self.setEmpty = empty
+    self.setPrevious = setPrevious
+    self.setNext = setNext
+    SetButtonEnabled(save, false)
+    SetButtonEnabled(load, false)
+    SetButtonEnabled(rename, false)
+    SetButtonEnabled(delete, false)
+end
+
+function UI:SelectSavedSet(presetId)
+    self.selectedSetId = presetId
+    local savedSet = presetId ~= nil and Addon.savedSets[presetId]
+    if savedSet then self.setNameEdit:SetText(savedSet.name) end
+    self:UpdateSavedSetSelection()
+end
+
+function UI:UpdateSavedSetSelection()
+    if not self.setRows then return end
+    for _, row in ipairs(self.setRows) do
+        if row.presetId ~= nil and row.presetId == self.selectedSetId then
+            row:LockHighlight()
+        else
+            row:UnlockHighlight()
+        end
+    end
+    local selected = self.selectedSetId ~= nil and Addon.savedSets[self.selectedSetId] ~= nil
+    SetButtonEnabled(self.loadSet, not self.busy and selected)
+    SetButtonEnabled(self.renameSet, not self.busy and selected)
+    SetButtonEnabled(self.deleteSet, not self.busy and selected)
+end
+
+function UI:ShowSavedSets(savedSets, maxSets)
+    if not self.setRows then return end
+    local presetIds = {}
+    for presetId in pairs(savedSets) do table.insert(presetIds, presetId) end
+    table.sort(presetIds)
+
+    self.savedSetIds = presetIds
+    self.maxSets = maxSets or 0
+    if self.selectedSetId ~= nil and not savedSets[self.selectedSetId] then self.selectedSetId = nil end
+    if self.selectedSetId ~= nil then
+        self.setNameEdit:SetText(savedSets[self.selectedSetId].name)
+    else
+        self.setNameEdit:SetText("")
+    end
+    local pageCount = math.max(1, math.ceil(#presetIds / 10))
+    self.setPage = math.min(self.setPage or 0, pageCount - 1)
+    self:RenderSavedSets()
+end
+
+function UI:RenderSavedSets()
+    local presetIds = self.savedSetIds or {}
+    local pageCount = math.max(1, math.ceil(#presetIds / 10))
+    self.setPage = math.max(0, math.min(self.setPage or 0, pageCount - 1))
+    local startIndex = self.setPage * 10
+    for index, row in ipairs(self.setRows) do
+        local presetId = presetIds[startIndex + index]
+        row.presetId = presetId
+        if presetId ~= nil then
+            row:SetText(((startIndex + index) .. ". ") .. Addon.savedSets[presetId].name)
+            row:Show()
+        else
+            row:Hide()
+        end
+    end
+    if #presetIds == 0 then self.setEmpty:Show() else self.setEmpty:Hide() end
+    self.setCount:SetText(string.format(L.SETS_COUNT, #presetIds, self.maxSets or 0))
+    SetButtonEnabled(self.setPrevious, self.setPage > 0)
+    SetButtonEnabled(self.setNext, self.setPage + 1 < pageCount)
+    SetButtonEnabled(self.saveSet, not self.busy and #presetIds < (self.maxSets or 0))
+    self:UpdateSavedSetSelection()
+end
+
 function UI:Create()
     if self.frame then
         return
@@ -324,6 +508,19 @@ function UI:Create()
 
     local close = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", -8, -8)
+
+    local outfits = CreateButton(frame, L.OUTFITS, 112, 24)
+    outfits:SetPoint("RIGHT", close, "LEFT", -4, 0)
+    outfits:SetScript("OnClick", function()
+        if self.outfitPanel:IsShown() then
+            self.outfitPanel:Hide()
+        else
+            self.outfitPanel:Show()
+            Addon:RequestSets()
+        end
+    end)
+
+    self:CreateOutfitPanel(frame)
 
     local previewPanel = CreatePanel(frame, PREVIEW_WIDTH, PANEL_HEIGHT)
     previewPanel:SetPoint("TOPLEFT", 18, -62)
@@ -519,12 +716,14 @@ function UI:Create()
     self.cancelDraft = resetPreview
     self.status = status
     self.gridOverlay = gridOverlay
+    self.outfits = outfits
 end
 
 function UI:Open()
     self:Create()
     self.busy = false
     self.frame:Show()
+    self.outfitPanel:Hide()
     Addon:ClearDraft()
     self:RefreshSlotIcons()
 
@@ -645,6 +844,12 @@ function UI:SetBusy(busy)
     SetButtonEnabled(self.remove, not busy and ((self.currentEntry or 0) ~= 0 or Addon.draftSlots[self.selectedSlot] ~= nil))
     SetButtonEnabled(self.resetAll, not busy and Addon.transmogSlots and next(Addon.transmogSlots) ~= nil)
     SetButtonEnabled(self.cancelDraft, not busy and Addon:GetDraftCount() > 0)
+    self:UpdateSavedSetSelection()
+    if self.saveSet then
+        local savedCount = 0
+        for _ in pairs(Addon.savedSets or {}) do savedCount = savedCount + 1 end
+        SetButtonEnabled(self.saveSet, not busy and savedCount < (self.maxSets or 0))
+    end
 end
 
 function UI:SetStatus(text, red, green, blue)

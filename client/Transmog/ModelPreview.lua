@@ -84,6 +84,32 @@ function Addon:SetDraftRemoval(slot)
     end
 end
 
+function Addon:LoadSavedSet(presetId)
+    local savedSet = self.savedSets and self.savedSets[presetId]
+    if not savedSet then return false end
+
+    local draft = {}
+    for slot, currentEntry in pairs(self.transmogSlots or {}) do
+        if currentEntry and not savedSet.entries[slot] then draft[slot] = 0 end
+    end
+    for slot, itemEntry in pairs(savedSet.entries) do
+        if self.transmogSlots[slot] ~= itemEntry then draft[slot] = itemEntry end
+    end
+
+    self.draftSlots = draft
+    if self.UI then
+        self.UI.selectedEntry = self.UI.selectedSlot and draft[self.UI.selectedSlot] or nil
+    end
+    self:PreviewDraft()
+    if self.UI then
+        self.UI:UpdateDraftState()
+        self.UI:UpdateSelection()
+        self.UI:UpdateSelectedItemText()
+        self.UI:SetStatus(string.format(ACoreTransmogLocale.SET_LOADED, savedSet.name), 0.35, 0.8, 1)
+    end
+    return true
+end
+
 function Addon:ClearDraft()
     self.draftSlots = {}
     self.pendingDraftPreview = false

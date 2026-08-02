@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <charconv>
 #include <limits>
+#include <map>
 #include <sstream>
 #include <string_view>
 #include <unordered_map>
@@ -25,7 +26,7 @@
 namespace
 {
 constexpr std::string_view AddonPrefix = "AC_TRANSMOG";
-constexpr uint32 ProtocolVersion = 3;
+constexpr uint32 ProtocolVersion = 4;
 constexpr uint32 MinListIntervalMs = 150;
 constexpr uint32 MinOperationIntervalMs = 500;
 constexpr std::size_t ItemsPerChunk = 20;
@@ -171,6 +172,119 @@ void SendSlotStates(Player* player)
         first = false;
     }
     Send(player, "SLOTS\t" + states.str());
+}
+
+bool NormalizeSetName(std::string const& value, std::string& normalized)
+{
+    std::size_t first = value.find_first_not_of(' ');
+    std::size_t last = value.find_last_not_of(' ');
+    if (first == std::string::npos)
+        return false;
+
+    normalized = value.substr(first, last - first + 1);
+    if (normalized.size() > 64 || std::any_of(normalized.begin(), normalized.end(), [](unsigned char character)
+    {
+        return character < 0x20;
+    }))
+        return false;
+
+    std::wstring wideName;
+    return Utf8toWStr(normalized, wideName) && wideName.size() <= 24;
+}
+
+bool ParseSetEntries(std::string const& encoded, Transmogrification::slotMap& entries)
+{
+    if (encoded.empty())
+        return false;
+
+    std::stringstream values(encoded);
+    std::string value;
+    while (std::getline(values, value, ','))
+    {
+        std::size_t separator = value.find(':');
+        uint32 slot = 0;
+        uint32 itemEntry = 0;
+        if (separator == std::string::npos || value.find(':', separator + 1) != std::string::npos ||
+            !ParseUnsigned(value.substr(0, separator), slot) || !ParseUnsigned(value.substr(separator + 1), itemEntry) ||
+            slot >= EQUIPMENT_SLOT_END || itemEntry <= HIDDEN_ITEM_ID || entries.contains(static_cast<uint8>(slot)))
+            return false;
+        entries[static_cast<uint8>(slot)] = itemEntry;
+    }
+    return !entries.empty();
+}
+
+std::string EncodeSetEntries(Transmogrification::slotMap const& entries, char pairSeparator, char valueSeparator)
+{
+    std::ostringstream encoded;
+    bool first = true;
+    for (auto const& [slot, itemEntry] : entries)
+    {
+        if (itemEntry <= HIDDEN_ITEM_ID)
+            continue;
+        if (!first)
+            encoded << pairSeparator;
+        encoded << uint32(slot) << valueSeparator << itemEntry;
+        first = false;
+    }
+    return encoded.str();
+}
+
+void SendSetResult(Player* player, uint32 requestId, std::string_view status, std::string_view action, uint32 presetId = 0)
+{
+    Send(player, "SET_RESULT\t" + std::to_string(requestId) + "\t" + std::string(status) + "\t" +
+        std::string(action) + "\t" + std::to_string(presetId));
+}
+
+void SendSets(Player* player, uint32 requestId)
+{
+    ObjectGuid playerGuid = player->GetGUID();
+    std::vector<uint8> presetIds;
+    for (auto const& [presetId, name] : sTransmogrification->presetByName[playerGuid])
+    {
+        auto preset = sTransmogrification->presetById[playerGuid].find(presetId);
+        if (!name.empty() && preset != sTransmogrification->presetById[playerGuid].end() &&
+            !EncodeSetEntries(preset->second, ',', ':').empty())
+            presetIds.push_back(presetId);
+    }
+
+    Send(player, "SETS\t" + std::to_string(requestId) + "\t" + std::to_string(presetIds.size()) + "\t" +
+        std::to_string(sTransmogrification->GetMaxSets()));
+    for (uint8 presetId : presetIds)
+    {
+        std::string name;
+        if (!NormalizeSetName(sTransmogrification->presetByName[playerGuid][presetId], name))
+            name = "Outfit " + std::to_string(presetId + 1);
+        Send(player, "SET\t" + std::to_string(requestId) + "\t" + std::to_string(presetId) + "\t" + name + "\t" +
+            EncodeSetEntries(sTransmogrification->presetById[playerGuid][presetId], ',', ':'));
+    }
+}
+
+bool BeginSetOperation(Player* player, uint32 requestId, uint32 sessionId, ClientState*& state)
+{
+    if (!ValidateSession(player, sessionId, state))
+    {
+        SendSetResult(player, requestId, "ERROR", "SESSION");
+        return false;
+    }
+    if (!sTransmogrification->GetEnableSets())
+    {
+        SendSetResult(player, requestId, "ERROR", "SETS_DISABLED");
+        return false;
+    }
+
+    uint64 now = NowMs();
+    if (state->completedOperations.contains(requestId))
+    {
+        SendSetResult(player, requestId, "ERROR", "DUPLICATE");
+        return false;
+    }
+    if (state->lastOperationAtMs && now - state->lastOperationAtMs < MinOperationIntervalMs)
+    {
+        SendSetResult(player, requestId, "ERROR", "THROTTLED");
+        return false;
+    }
+    state->lastOperationAtMs = now;
+    return true;
 }
 
 void HandleHello(Player* player, std::vector<std::string> const& parts)
@@ -624,6 +738,178 @@ void HandleRemoveAll(Player* player, std::vector<std::string> const& parts)
         std::to_string(player->GetMoney()));
     SendSlotStates(player);
 }
+
+void HandleListSets(Player* player, std::vector<std::string> const& parts)
+{
+    uint32 requestId = 0;
+    uint32 sessionId = 0;
+    if (parts.size() < 3 || !ParseUnsigned(parts[1], requestId) || !ParseUnsigned(parts[2], sessionId))
+        return;
+
+    ClientState* state = nullptr;
+    if (!ValidateSession(player, sessionId, state))
+    {
+        SendSetResult(player, requestId, "ERROR", "SESSION");
+        return;
+    }
+    if (!sTransmogrification->GetEnableSets())
+    {
+        SendSetResult(player, requestId, "ERROR", "SETS_DISABLED");
+        return;
+    }
+    SendSets(player, requestId);
+}
+
+void HandleSaveSet(Player* player, std::vector<std::string> const& parts)
+{
+    uint32 requestId = 0;
+    uint32 sessionId = 0;
+    if (parts.size() < 5 || !ParseUnsigned(parts[1], requestId) || !ParseUnsigned(parts[2], sessionId))
+        return;
+
+    ClientState* state = nullptr;
+    if (!BeginSetOperation(player, requestId, sessionId, state))
+        return;
+
+    std::string name;
+    Transmogrification::slotMap entries;
+    if (!NormalizeSetName(parts[3], name))
+    {
+        SendSetResult(player, requestId, "ERROR", "SET_NAME");
+        return;
+    }
+    if (!ParseSetEntries(parts[4], entries))
+    {
+        SendSetResult(player, requestId, "ERROR", "EMPTY_SET");
+        return;
+    }
+
+    ObjectGuid playerGuid = player->GetGUID();
+    if (sTransmogrification->presetByName[playerGuid].size() >= sTransmogrification->GetMaxSets())
+    {
+        SendSetResult(player, requestId, "ERROR", "SET_LIMIT");
+        return;
+    }
+    for (auto const& [presetId, existingName] : sTransmogrification->presetByName[playerGuid])
+    {
+        if (existingName == name)
+        {
+            SendSetResult(player, requestId, "ERROR", "SET_NAME_EXISTS");
+            return;
+        }
+    }
+
+    auto collection = sTransmogrification->collectionCache.find(player->GetSession()->GetAccountId());
+    if (collection == sTransmogrification->collectionCache.end())
+    {
+        SendSetResult(player, requestId, "ERROR", "NOT_COLLECTED");
+        return;
+    }
+    for (auto const& [slot, itemEntry] : entries)
+    {
+        if (!sObjectMgr->GetItemTemplate(itemEntry) || !collection->second.contains(itemEntry))
+        {
+            SendSetResult(player, requestId, "ERROR", "NOT_COLLECTED");
+            return;
+        }
+    }
+
+    uint8 presetId = 0;
+    while (presetId < sTransmogrification->GetMaxSets() && sTransmogrification->presetByName[playerGuid].contains(presetId))
+        ++presetId;
+    if (presetId >= sTransmogrification->GetMaxSets())
+    {
+        SendSetResult(player, requestId, "ERROR", "SET_LIMIT");
+        return;
+    }
+
+    std::string databaseName = name;
+    CharacterDatabase.EscapeString(databaseName);
+    std::string databaseData = EncodeSetEntries(entries, ' ', ' ');
+    CharacterDatabase.Execute(
+        "REPLACE INTO `custom_transmogrification_sets` (`Owner`, `PresetID`, `SetName`, `SetData`) VALUES ({}, {}, '{}', '{}')",
+        playerGuid.GetCounter(), uint32(presetId), databaseName, databaseData);
+    sTransmogrification->presetByName[playerGuid][presetId] = name;
+    sTransmogrification->presetById[playerGuid][presetId] = entries;
+
+    state->completedOperations.insert(requestId);
+    SendSetResult(player, requestId, "OK", "SAVED", presetId);
+}
+
+void HandleRenameSet(Player* player, std::vector<std::string> const& parts)
+{
+    uint32 requestId = 0;
+    uint32 sessionId = 0;
+    uint8 presetId = 0;
+    if (parts.size() < 5 || !ParseUnsigned(parts[1], requestId) || !ParseUnsigned(parts[2], sessionId) ||
+        !ParseUnsigned(parts[3], presetId))
+        return;
+
+    ClientState* state = nullptr;
+    if (!BeginSetOperation(player, requestId, sessionId, state))
+        return;
+
+    ObjectGuid playerGuid = player->GetGUID();
+    auto preset = sTransmogrification->presetByName[playerGuid].find(presetId);
+    if (preset == sTransmogrification->presetByName[playerGuid].end())
+    {
+        SendSetResult(player, requestId, "ERROR", "SET_NOT_FOUND");
+        return;
+    }
+
+    std::string name;
+    if (!NormalizeSetName(parts[4], name))
+    {
+        SendSetResult(player, requestId, "ERROR", "SET_NAME");
+        return;
+    }
+    for (auto const& [existingId, existingName] : sTransmogrification->presetByName[playerGuid])
+    {
+        if (existingId != presetId && existingName == name)
+        {
+            SendSetResult(player, requestId, "ERROR", "SET_NAME_EXISTS");
+            return;
+        }
+    }
+
+    std::string databaseName = name;
+    CharacterDatabase.EscapeString(databaseName);
+    CharacterDatabase.Execute("UPDATE `custom_transmogrification_sets` SET `SetName` = '{}' WHERE `Owner` = {} AND `PresetID` = {}",
+        databaseName, playerGuid.GetCounter(), uint32(presetId));
+    preset->second = name;
+
+    state->completedOperations.insert(requestId);
+    SendSetResult(player, requestId, "OK", "RENAMED", presetId);
+}
+
+void HandleDeleteSet(Player* player, std::vector<std::string> const& parts)
+{
+    uint32 requestId = 0;
+    uint32 sessionId = 0;
+    uint8 presetId = 0;
+    if (parts.size() < 4 || !ParseUnsigned(parts[1], requestId) || !ParseUnsigned(parts[2], sessionId) ||
+        !ParseUnsigned(parts[3], presetId))
+        return;
+
+    ClientState* state = nullptr;
+    if (!BeginSetOperation(player, requestId, sessionId, state))
+        return;
+
+    ObjectGuid playerGuid = player->GetGUID();
+    if (!sTransmogrification->presetByName[playerGuid].contains(presetId))
+    {
+        SendSetResult(player, requestId, "ERROR", "SET_NOT_FOUND");
+        return;
+    }
+
+    CharacterDatabase.Execute("DELETE FROM `custom_transmogrification_sets` WHERE `Owner` = {} AND `PresetID` = {}",
+        playerGuid.GetCounter(), uint32(presetId));
+    sTransmogrification->presetByName[playerGuid].erase(presetId);
+    sTransmogrification->presetById[playerGuid].erase(presetId);
+
+    state->completedOperations.insert(requestId);
+    SendSetResult(player, requestId, "OK", "DELETED", presetId);
+}
 }
 
 namespace TransmogAddon
@@ -675,6 +961,14 @@ bool HandleMessage(Player* player, std::string const& message)
         HandleRemove(player, parts);
     else if (parts[0] == "REMOVE_ALL" && IsEnabled())
         HandleRemoveAll(player, parts);
+    else if (parts[0] == "LIST_SETS" && IsEnabled())
+        HandleListSets(player, parts);
+    else if (parts[0] == "SAVE_SET" && IsEnabled())
+        HandleSaveSet(player, parts);
+    else if (parts[0] == "RENAME_SET" && IsEnabled())
+        HandleRenameSet(player, parts);
+    else if (parts[0] == "DELETE_SET" && IsEnabled())
+        HandleDeleteSet(player, parts);
     else if (parts[0] == "CLOSE")
     {
         auto client = Clients.find(player->GetGUID());
