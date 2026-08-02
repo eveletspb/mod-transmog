@@ -154,7 +154,7 @@ function UI:CreateItemButton(parent, index)
     button:SetWidth(ITEM_SIZE)
     button:SetHeight(ITEM_SIZE)
 
-    local column = math.mod(index - 1, GRID_COLUMNS)
+    local column = (index - 1) % GRID_COLUMNS
     local row = math.floor((index - 1) / GRID_COLUMNS)
     button:SetPoint("TOPLEFT", 58 + column * (ITEM_SIZE + ITEM_GAP), -102 - row * (ITEM_SIZE + ITEM_GAP))
 
