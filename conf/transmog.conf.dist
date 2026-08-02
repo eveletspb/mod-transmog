@@ -24,6 +24,19 @@
 #                     If disabled, players must have an item in their bags to use as a transmogrification appearance source.
 #        Default:     1
 #
+#    Transmogrification.AutoCollectInventoryAppearances
+#        Description: Automatically collects eligible appearances from the player's backpack and equipped bags
+#                     without requiring the item to be equipped. Refundable and temporarily BoP-tradeable items
+#                     are skipped. Has no effect when UseCollectionSystem is disabled.
+#        Default:     1
+#
+#    Transmogrification.AutoCollectBindItems
+#        Description: Bind eligible BOE items when their appearances are automatically collected.
+#                     Disable only if the server intentionally allows the same tradeable item to permanently
+#                     unlock its appearance for multiple accounts. This setting affects automatic collection only;
+#                     explicit `.transmog claim` continues to bind the claimed item.
+#        Default:     1
+#
 #    Transmogrification.UseVendorInterface
 #        Description: Enables/Disables the use of a fake vendor interface for item selection.
 #                     There are (optional) custom items available for Hide Item and Remove Transmog if data/sql/db-world/tasm_world_VendorItems.sql is imported.
@@ -87,6 +100,8 @@
 Transmogrification.Enable = 1
 Transmogrification.ShowSetDisclaimer = 0
 Transmogrification.UseCollectionSystem = 1
+Transmogrification.AutoCollectInventoryAppearances = 1
+Transmogrification.AutoCollectBindItems = 1
 Transmogrification.UseVendorInterface = 0
 Transmogrification.AllowHiddenTransmog = 1
 Transmogrification.HiddenTransmogIsFree = 1

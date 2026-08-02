@@ -46,3 +46,6 @@ local.properties
 .loadpath
 .project
 .cproject
+
+# Local development context for Codex
+/docs/MODULE_CONTEXT.md

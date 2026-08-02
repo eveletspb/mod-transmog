@@ -507,6 +507,44 @@ void Transmogrification::AddToDatabase(Player* player, ItemTemplate const* itemT
     }
 }
 
+ClaimAppearanceResult Transmogrification::ClaimAppearance(Player* player, Item* item, ClaimAppearanceMode mode)
+{
+    if (!player || !item || !player->GetSession())
+        return ClaimAppearanceResult::Unsuitable;
+
+    ItemTemplate const* itemTemplate = item->GetTemplate();
+    if (!itemTemplate)
+        return ClaimAppearanceResult::Unsuitable;
+
+    uint32 accountId = player->GetSession()->GetAccountId();
+    auto accountCollection = collectionCache.find(accountId);
+    if (accountCollection != collectionCache.end() && accountCollection->second.contains(itemTemplate->ItemId))
+        return ClaimAppearanceResult::AlreadyOwned;
+
+    if (!SuitableForTransmogrification(player, itemTemplate))
+        return ClaimAppearanceResult::Unsuitable;
+
+    bool isAutomatic = mode == ClaimAppearanceMode::Automatic;
+    if (isAutomatic && item->HasFlag(ITEM_FIELD_FLAGS, ITEM_FIELD_FLAG_REFUNDABLE))
+        return ClaimAppearanceResult::Refundable;
+    if (isAutomatic && item->HasFlag(ITEM_FIELD_FLAGS, ITEM_FIELD_FLAG_BOP_TRADEABLE))
+        return ClaimAppearanceResult::Tradeable;
+
+    bool shouldBind = mode == ClaimAppearanceMode::Explicit || GetAutoCollectBindItems();
+    if (shouldBind)
+    {
+        item->SetOwnerGUID(player->GetGUID());
+        item->SetNotRefundable(player);
+        if (!GetAllowTradeable())
+            item->ClearSoulboundTradeable(player);
+        item->SetBinding(true);
+        item->SetState(ITEM_CHANGED, player);
+    }
+
+    AddToDatabase(player, itemTemplate);
+    return ClaimAppearanceResult::Claimed;
+}
+
 TransmogStrings Transmogrification::Transmogrify(Player* player, uint32 itemEntry, uint8 slot, /*uint32 newEntry, */bool no_cost) {
     if (itemEntry == UINT_MAX) // Hidden transmog
     {
@@ -1180,6 +1218,8 @@ void Transmogrification::LoadConfig(bool reload)
     IgnoreReqEvent = sConfigMgr->GetOption<bool>("Transmogrification.IgnoreReqEvent", false);
     IgnoreReqStats = sConfigMgr->GetOption<bool>("Transmogrification.IgnoreReqStats", false);
     UseCollectionSystem = sConfigMgr->GetOption<bool>("Transmogrification.UseCollectionSystem", true);
+    AutoCollectInventoryAppearances = sConfigMgr->GetOption<bool>("Transmogrification.AutoCollectInventoryAppearances", true);
+    AutoCollectBindItems = sConfigMgr->GetOption<bool>("Transmogrification.AutoCollectBindItems", true);
     UseVendorInterface = sConfigMgr->GetOption<bool>("Transmogrification.UseVendorInterface", false);
     AllowHiddenTransmog = sConfigMgr->GetOption<bool>("Transmogrification.AllowHiddenTransmog", true);
     HiddenTransmogIsFree = sConfigMgr->GetOption<bool>("Transmogrification.HiddenTransmogIsFree", true);
@@ -1358,6 +1398,14 @@ bool Transmogrification::GetUseCollectionSystem() const
 {
     return UseCollectionSystem;
 };
+bool Transmogrification::GetAutoCollectInventoryAppearances() const
+{
+    return AutoCollectInventoryAppearances;
+}
+bool Transmogrification::GetAutoCollectBindItems() const
+{
+    return AutoCollectBindItems;
+}
 bool Transmogrification::GetUseVendorInterface() const
 {
     return UseVendorInterface;
