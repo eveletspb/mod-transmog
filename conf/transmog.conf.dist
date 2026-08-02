@@ -44,6 +44,23 @@
 #                     If disabled, players will use the gossip menu to select items and will not have access to previews.
 #        Default:     0
 #
+#    Transmogrification.Addon.Enabled
+#        Description: Enables the optional client addon protocol.
+#        Default:     1
+#
+#    Transmogrification.Addon.PreferInterface
+#        Description: Opens the client addon instead of gossip when a compatible addon is detected.
+#                     Players without the addon continue to use the gossip interface.
+#        Default:     1
+#
+#    Transmogrification.Addon.SessionTtlSeconds
+#        Description: Time during which addon operations remain authorized after interacting with the NPC.
+#        Default:     60
+#
+#    Transmogrification.Addon.PageSize
+#        Description: Number of appearances returned for one addon page. Valid range: 1-60.
+#        Default:     60
+#
 #    Transmogrification.AllowHiddenTransmog
 #        Description: Enables/Disables the hiding of equipment through transmog
 #                     If enabled, players can select an "invisible" appearance for items at the transmog vendor
@@ -103,6 +120,10 @@ Transmogrification.UseCollectionSystem = 1
 Transmogrification.AutoCollectInventoryAppearances = 1
 Transmogrification.AutoCollectBindItems = 1
 Transmogrification.UseVendorInterface = 0
+Transmogrification.Addon.Enabled = 1
+Transmogrification.Addon.PreferInterface = 1
+Transmogrification.Addon.SessionTtlSeconds = 60
+Transmogrification.Addon.PageSize = 60
 Transmogrification.AllowHiddenTransmog = 1
 Transmogrification.HiddenTransmogIsFree = 1
 Transmogrification.TrackUnusableItems = 1

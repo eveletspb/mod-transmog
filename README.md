@@ -19,6 +19,7 @@ Fork-specific additions:
 - protection for refundable and temporarily BoP-tradeable items;
 - a shared validation and claim path for automatic collection and `.transmog claim`;
 - safer interoperability with auto-sell modules: the collection hook does not retain or dereference its incoming `Item*` and resolves current inventory items by slot instead.
+- an optional WoW 3.3.5a client addon with its own appearance browser and `DressUpModel` preview.
 
 The new behavior is controlled by `Transmogrification.AutoCollectInventoryAppearances` and `Transmogrification.AutoCollectBindItems`. Both options are enabled by default and are documented below and in `conf/transmog.conf.dist`.
 
@@ -77,6 +78,42 @@ With a gm account goto the location you want to add the npc and use this command
 
 If you need to change the module configuration, go to your server configuration folder (e.g. **etc**), copy `transmog.conf.dist` to `transmog.conf` and edit it as you prefer.
 
+## Client addon
+
+The optional addon is located in `client/Transmog`. Copy that directory to the
+client so the resulting layout is:
+
+```text
+World of Warcraft/
+└── Interface/
+    └── AddOns/
+        └── Transmog/
+            ├── Transmog.toc
+            ├── Core.lua
+            └── ...
+```
+
+Enable `ACore Transmog` in the character-selection addon list. The addon sends a
+protocol handshake after login. When the player then interacts with the existing
+transmogrifier NPC, its window opens instead of the gossip item browser. Players
+without the addon continue to use the original gossip interface.
+
+Server configuration:
+
+```ini
+Transmogrification.Addon.Enabled = 1
+Transmogrification.Addon.PreferInterface = 1
+Transmogrification.Addon.SessionTtlSeconds = 60
+Transmogrification.Addon.PageSize = 60
+```
+
+The AzerothCore addon channel must also be enabled with `AddonChannel = 1` in
+`worldserver.conf`. No additional SQL is required.
+
+The preview uses the client API `DressUpModel:TryOn()`. Test it on the exact HD
+client build before deployment because some custom clients modify or break that
+API independently of the server.
+
 ## Automatic appearance collection
 
 When the account-wide collection system is enabled, the module can automatically collect eligible appearances from the player's backpack and equipped bags without requiring the item to be equipped:
@@ -94,6 +131,4 @@ Setting `AutoCollectBindItems = 0` keeps the physical item unchanged while perma
 ## License
 
 This module is released under the [GNU AGPL license](https://github.com/azerothcore/mod-transmog/blob/master/LICENSE).
-
-
 

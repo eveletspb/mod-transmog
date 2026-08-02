@@ -20,6 +20,7 @@ Cant transmogrify rediculus items // Foereaper: would be fun to stab people with
 -- Cant think of any good way to handle this easily, could rip flagged items from cata DB
 */
 #include "Transmogrification.h"
+#include "TransmogAddon.h"
 #include "Chat.h"
 #include "ScriptedCreature.h"
 #include "ItemTemplate.h"
@@ -203,6 +204,12 @@ public:
 
         // Clear the search string for the player
         sT->searchStringByPlayer.erase(player->GetGUID().GetCounter());
+
+        if (TransmogAddon::TryOpen(player, creature))
+        {
+            CloseGossipMenuFor(player);
+            return true;
+        }
 
         if (sT->GetEnableTransmogInfo())
             AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG, "|TInterface/ICONS/INV_Misc_Book_11:30:30:-18:0|t" + Tstr(session, LANG_TRANSMOG_HOWWORKS), EQUIPMENT_SLOT_END + 9, 0);
@@ -687,6 +694,28 @@ public:
     }
 };
 
+class transmog_addon_player_script : public PlayerScript
+{
+public:
+    transmog_addon_player_script() : PlayerScript("transmog_addon_player_script", {
+        PLAYERHOOK_CAN_PLAYER_USE_PRIVATE_CHAT,
+        PLAYERHOOK_ON_LOGOUT
+    }) { }
+
+    bool OnPlayerCanUseChat(Player* player, uint32 /*type*/, uint32 language, std::string& message, Player* receiver) override
+    {
+        if (language != LANG_ADDON || player != receiver)
+            return true;
+
+        return !TransmogAddon::HandleMessage(player, message);
+    }
+
+    void OnPlayerLogout(Player* player) override
+    {
+        TransmogAddon::OnLogout(player);
+    }
+};
+
 class PS_Transmogrification : public PlayerScript
 {
 private:
@@ -1070,6 +1099,7 @@ void AddSC_Transmog()
     new global_transmog_script();
     new unit_transmog_script();
     new npc_transmogrifier();
+    new transmog_addon_player_script();
     new PS_Transmogrification();
     new WS_Transmogrification();
 }
