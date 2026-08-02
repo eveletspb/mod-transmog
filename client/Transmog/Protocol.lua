@@ -2,7 +2,7 @@ ACoreTransmog = ACoreTransmog or {}
 
 local Addon = ACoreTransmog
 local PREFIX = "AC_TRANSMOG"
-local VERSION = 1
+local VERSION = 2
 
 Addon.connected = false
 Addon.sessionId = nil
@@ -82,6 +82,16 @@ function Addon:Remove(slot)
     local requestId = self:NextRequestId()
     self.UI:SetBusy(true)
     self:Send(string.format("REMOVE\t%d\t%d\t%d", requestId, self.sessionId, slot))
+end
+
+function Addon:RemoveAll()
+    if not self.sessionId then
+        return
+    end
+    local requestId = self:NextRequestId()
+    self.UI:SetBusy(true)
+    self.UI:SetStatus(ACoreTransmogLocale.REMOVING_ALL, 1, 0.82, 0)
+    self:Send(string.format("REMOVE_ALL\t%d\t%d", requestId, self.sessionId))
 end
 
 function Addon:CloseSession()
@@ -226,11 +236,14 @@ function Addon:HandleProtocolMessage(message)
         if parts[3] == "OK" then
             local slot = tonumber(parts[4])
             local itemEntry = tonumber(parts[5]) or 0
-            if slot then
+            if slot == 255 then
+                self.transmogSlots = {}
+                self.UI.pendingResultStatus = ACoreTransmogLocale.RESET_ALL_SUCCESS
+            elseif slot then
                 self.transmogSlots[slot] = itemEntry ~= 0 and itemEntry or nil
-                self.UI:UpdateTransmogSlotMarkers()
+                self.UI.pendingResultStatus = itemEntry == 0 and ACoreTransmogLocale.REMOVED or ACoreTransmogLocale.APPLIED
             end
-            self.UI.pendingResultStatus = itemEntry == 0 and ACoreTransmogLocale.REMOVED or ACoreTransmogLocale.APPLIED
+            self.UI:UpdateTransmogSlotMarkers()
             self.UI:RefreshCurrentPage()
         else
             local errorCode = parts[4]

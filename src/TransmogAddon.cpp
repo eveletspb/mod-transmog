@@ -2,6 +2,7 @@
 
 #include "Chat.h"
 #include "Config.h"
+#include "DatabaseEnv.h"
 #include "GameTime.h"
 #include "Item.h"
 #include "ObjectAccessor.h"
@@ -24,7 +25,7 @@
 namespace
 {
 constexpr std::string_view AddonPrefix = "AC_TRANSMOG";
-constexpr uint32 ProtocolVersion = 1;
+constexpr uint32 ProtocolVersion = 2;
 constexpr uint32 MinListIntervalMs = 150;
 constexpr uint32 MinOperationIntervalMs = 500;
 constexpr std::size_t ItemsPerChunk = 20;
@@ -422,6 +423,55 @@ void HandleRemove(Player* player, std::vector<std::string> const& parts)
         std::to_string(player->GetMoney()));
     SendSlotStates(player);
 }
+
+void HandleRemoveAll(Player* player, std::vector<std::string> const& parts)
+{
+    uint32 requestId = 0;
+    uint32 sessionId = 0;
+    if (parts.size() < 3 || !ParseUnsigned(parts[1], requestId) || !ParseUnsigned(parts[2], sessionId))
+        return;
+
+    ClientState* state = nullptr;
+    if (!ValidateSession(player, sessionId, state))
+    {
+        SendError(player, requestId, "SESSION");
+        return;
+    }
+
+    uint64 now = NowMs();
+    if (state->completedOperations.contains(requestId))
+    {
+        SendError(player, requestId, "DUPLICATE");
+        return;
+    }
+    if (state->lastOperationAtMs && now - state->lastOperationAtMs < MinOperationIntervalMs)
+    {
+        SendError(player, requestId, "THROTTLED");
+        return;
+    }
+    state->lastOperationAtMs = now;
+
+    bool removed = false;
+    auto transaction = CharacterDatabase.BeginTransaction();
+    for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+    {
+        Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+        if (!item || !sTransmogrification->GetFakeEntry(item->GetGUID()))
+            continue;
+
+        sTransmogrification->DeleteFakeEntry(player, slot, item, &transaction);
+        removed = true;
+    }
+
+    if (removed)
+        CharacterDatabase.CommitTransaction(transaction);
+
+    state->completedOperations.insert(requestId);
+    state->lastListAtMs = 0;
+    Send(player, "RESULT\t" + std::to_string(requestId) + "\tOK\t255\t0\t" +
+        std::to_string(player->GetMoney()));
+    SendSlotStates(player);
+}
 }
 
 namespace TransmogAddon
@@ -469,6 +519,8 @@ bool HandleMessage(Player* player, std::string const& message)
         HandleApply(player, parts);
     else if (parts[0] == "REMOVE" && IsEnabled())
         HandleRemove(player, parts);
+    else if (parts[0] == "REMOVE_ALL" && IsEnabled())
+        HandleRemoveAll(player, parts);
     else if (parts[0] == "CLOSE")
     {
         auto client = Clients.find(player->GetGUID());

@@ -36,6 +36,16 @@ local SLOT_TEXTURES = {
 local UI = {}
 Addon.UI = UI
 
+StaticPopupDialogs["ACORE_TRANSMOG_REMOVE_ALL"] = {
+    text = L.RESET_ALL_CONFIRM,
+    button1 = YES,
+    button2 = NO,
+    OnAccept = function() Addon:RemoveAll() end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+}
+
 local function AddSolidTexture(parent, layer, red, green, blue, alpha)
     local texture = parent:CreateTexture(nil, layer or "BACKGROUND")
     texture:SetTexture(red, green, blue, alpha or 1)
@@ -314,13 +324,20 @@ function UI:Create()
         self:SetModelScale(self.modelScale)
     end)
 
-    local resetPreview = CreateButton(previewPanel, L.RESET_PREVIEW, 126, 24)
-    resetPreview:SetPoint("BOTTOM", 0, 12)
+    local resetPreview = CreateButton(previewPanel, L.RESET_PREVIEW, 145, 24)
+    resetPreview:SetPoint("BOTTOMLEFT", 16, 12)
     resetPreview:SetScript("OnClick", function()
         self.selectedEntry = nil
         Addon:ResetPreview()
         self:UpdateSelection()
         self:UpdateSelectedItemText()
+    end)
+
+    local resetAll = CreateButton(previewPanel, L.RESET_ALL, 145, 24)
+    resetAll:SetPoint("BOTTOMRIGHT", -16, 12)
+    resetAll:GetFontString():SetTextColor(1, 0.3, 0.3)
+    resetAll:SetScript("OnClick", function()
+        StaticPopup_Show("ACORE_TRANSMOG_REMOVE_ALL")
     end)
 
     self.slotButtons = {}
@@ -460,6 +477,7 @@ function UI:Create()
     self.priceText = priceText
     self.apply = apply
     self.remove = remove
+    self.resetAll = resetAll
     self.status = status
     self.gridOverlay = gridOverlay
 end
@@ -509,6 +527,9 @@ function UI:UpdateTransmogSlotMarkers()
         SetOutlineShown(button.transmogOutline, hasTransmog and slot ~= self.selectedSlot)
         if hasTransmog then button.transmogMarker:Show() else button.transmogMarker:Hide() end
     end
+    if self.resetAll then
+        SetButtonEnabled(self.resetAll, Addon.transmogSlots and next(Addon.transmogSlots) ~= nil)
+    end
 end
 
 function UI:SelectSlot(slot)
@@ -552,6 +573,7 @@ end
 function UI:SetBusy(busy)
     SetButtonEnabled(self.apply, not busy and self.selectedEntry ~= nil and self.selectedEntry ~= self.currentEntry)
     SetButtonEnabled(self.remove, not busy and (self.currentEntry or 0) ~= 0)
+    SetButtonEnabled(self.resetAll, not busy and Addon.transmogSlots and next(Addon.transmogSlots) ~= nil)
 end
 
 function UI:SetStatus(text, red, green, blue)
