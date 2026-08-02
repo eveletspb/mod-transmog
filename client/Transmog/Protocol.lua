@@ -133,7 +133,11 @@ function Addon:HandleProtocolMessage(message)
 
     if command == "OPEN" then
         self.sessionId = tonumber(parts[2])
-        self.UI:Open()
+        local opened, errorMessage = pcall(function() self.UI:Open() end)
+        if not opened then
+            self.lastProtocolMessage = "UI_ERROR"
+            DEFAULT_CHAT_FRAME:AddMessage("|cffff4040ACore Transmog UI error:|r " .. tostring(errorMessage))
+        end
         return
     end
 

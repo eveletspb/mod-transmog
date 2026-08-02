@@ -274,7 +274,9 @@ function UI:Create()
     modelBackground:SetPoint("TOPLEFT", 58, -42)
     modelBackground:SetPoint("BOTTOMRIGHT", -58, 45)
 
-    local model = CreateFrame("DressUpModel", "ACoreTransmogModel", previewPanel)
+    -- DressUpModel is the name of Blizzard's global frame, not a valid
+    -- CreateFrame type on the 3.3.5 client. PlayerModel exposes SetUnit/TryOn.
+    local model = CreateFrame("PlayerModel", "ACoreTransmogModel", previewPanel)
     model:SetPoint("TOPLEFT", 53, -38)
     model:SetPoint("BOTTOMRIGHT", -53, 39)
     model:EnableMouse(true)
