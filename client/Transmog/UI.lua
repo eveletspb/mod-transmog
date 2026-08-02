@@ -138,14 +138,25 @@ function UI:CreateSlotButton(parent, slot, side, index)
     button.icon = icon
 
     button.normalOutline = AddOutline(button, 1, 0.32, 0.34, 0.4, 1)
-    button.transmogOutline = AddOutline(button, 2, 0.15, 0.95, 0.45, 1)
+    button.transmogOutline = AddOutline(button, 2, 1, 0.66, 0.12, 1)
     SetOutlineShown(button.transmogOutline, false)
+
+    local transmogGlow = button:CreateTexture(nil, "OVERLAY")
+    transmogGlow:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
+    transmogGlow:SetBlendMode("ADD")
+    transmogGlow:SetVertexColor(1, 0.58, 0.08)
+    transmogGlow:SetWidth(70)
+    transmogGlow:SetHeight(70)
+    transmogGlow:SetPoint("CENTER")
+    transmogGlow:Hide()
+    button.transmogGlow = transmogGlow
+
     button.selectedOutline = AddOutline(button, 2, 1, 0.72, 0.15, 1)
     SetOutlineShown(button.selectedOutline, false)
 
-    local transmogMarker = AddSolidTexture(button, "OVERLAY", 0.15, 0.95, 0.45, 1)
-    transmogMarker:SetWidth(9)
-    transmogMarker:SetHeight(9)
+    local transmogMarker = AddSolidTexture(button, "OVERLAY", 1, 0.72, 0.16, 1)
+    transmogMarker:SetWidth(10)
+    transmogMarker:SetHeight(10)
     transmogMarker:SetPoint("BOTTOMRIGHT", -3, 3)
     transmogMarker:Hide()
     button.transmogMarker = transmogMarker
@@ -153,6 +164,13 @@ function UI:CreateSlotButton(parent, slot, side, index)
     local highlight = AddSolidTexture(button, "HIGHLIGHT", 1, 0.82, 0.32, 0.16)
     highlight:SetPoint("TOPLEFT", 2, -2)
     highlight:SetPoint("BOTTOMRIGHT", -2, 2)
+
+    button:SetScript("OnUpdate", function(self, elapsed)
+        if not self.transmogActive then return end
+        self.transmogPulse = ((self.transmogPulse or 0) + elapsed) % 1.6
+        local alpha = 0.42 + 0.28 * math.sin(self.transmogPulse * math.pi * 1.25)
+        self.transmogGlow:SetAlpha(alpha)
+    end)
 
     button:SetScript("OnClick", function(self)
         UI:SelectSlot(self.slot)
@@ -162,7 +180,7 @@ function UI:CreateSlotButton(parent, slot, side, index)
         GameTooltip:SetText(L["SLOT_" .. self.slot] or tostring(self.slot), 1, 0.82, 0)
         GameTooltip:SetInventoryItem("player", self.slot + 1)
         if Addon.transmogSlots and Addon.transmogSlots[self.slot] then
-            GameTooltip:AddLine(L.SLOT_TRANSMOGRIFIED, 0.15, 0.95, 0.45)
+            GameTooltip:AddLine(L.SLOT_TRANSMOGRIFIED, 1, 0.72, 0.16)
         end
         GameTooltip:Show()
     end)
@@ -525,7 +543,15 @@ function UI:UpdateTransmogSlotMarkers()
     for slot, button in pairs(self.slotButtons) do
         local hasTransmog = Addon.transmogSlots and Addon.transmogSlots[slot] ~= nil
         SetOutlineShown(button.transmogOutline, hasTransmog and slot ~= self.selectedSlot)
-        if hasTransmog then button.transmogMarker:Show() else button.transmogMarker:Hide() end
+        button.transmogActive = hasTransmog
+        if hasTransmog then
+            button.transmogGlow:Show()
+            button.transmogMarker:Show()
+        else
+            button.transmogPulse = 0
+            button.transmogGlow:Hide()
+            button.transmogMarker:Hide()
+        end
     end
     if self.resetAll then
         SetButtonEnabled(self.resetAll, Addon.transmogSlots and next(Addon.transmogSlots) ~= nil)
