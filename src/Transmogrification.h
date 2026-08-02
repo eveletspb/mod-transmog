@@ -319,7 +319,7 @@ public:
     uint32 GetFakeEntry(ObjectGuid itemGUID) const;
     void UpdateItem(Player* player, Item* item) const;
     void DeleteFakeEntry(Player* player, uint8 slot, Item* itemTransmogrified, CharacterDatabaseTransaction* trans = nullptr);
-    void SetFakeEntry(Player* player, uint32 newEntry, uint8 slot, Item* itemTransmogrified);
+    void SetFakeEntry(Player* player, uint32 newEntry, uint8 slot, Item* itemTransmogrified, CharacterDatabaseTransaction* trans = nullptr);
     bool AddCollectedAppearance(uint32 accountId, uint32 itemId);
     // Adds the item's appearance to the player's account collection and, if newly unlocked,
     // notifies the player (LANG_TRANSMOG_ADDED_APPEARANCE). Shared by the auto-collect player

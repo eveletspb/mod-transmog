@@ -2,7 +2,7 @@
 ## Title: ACore Transmog
 ## Notes: Client interface for mod-transmog
 ## Author: AzerothCore
-## Version: 0.1.0
+## Version: 0.3.0
 ## SavedVariables: ACoreTransmogDB
 
 Localization.lua

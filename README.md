@@ -98,6 +98,11 @@ protocol handshake after login. When the player then interacts with the existing
 transmogrifier NPC, its window opens instead of the gossip item browser. Players
 without the addon continue to use the original gossip interface.
 
+The addon supports an outfit draft: players can preview appearances for several
+equipment slots, see the combined price, and apply the complete outfit in one
+validated server operation. Applied slots and unpublished draft changes use
+different highlights in the model panel.
+
 Server configuration:
 
 ```ini
@@ -131,4 +136,3 @@ Setting `AutoCollectBindItems = 0` keeps the physical item unchanged while perma
 ## License
 
 This module is released under the [GNU AGPL license](https://github.com/azerothcore/mod-transmog/blob/master/LICENSE).
-

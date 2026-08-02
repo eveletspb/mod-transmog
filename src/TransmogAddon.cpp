@@ -25,7 +25,7 @@
 namespace
 {
 constexpr std::string_view AddonPrefix = "AC_TRANSMOG";
-constexpr uint32 ProtocolVersion = 2;
+constexpr uint32 ProtocolVersion = 3;
 constexpr uint32 MinListIntervalMs = 150;
 constexpr uint32 MinOperationIntervalMs = 500;
 constexpr std::size_t ItemsPerChunk = 20;
@@ -374,6 +374,148 @@ void HandleApply(Player* player, std::vector<std::string> const& parts)
     SendSlotStates(player);
 }
 
+void HandleApplyOutfit(Player* player, std::vector<std::string> const& parts)
+{
+    uint32 requestId = 0;
+    uint32 sessionId = 0;
+    if (parts.size() < 4 || !ParseUnsigned(parts[1], requestId) || !ParseUnsigned(parts[2], sessionId) || parts[3].empty())
+        return;
+
+    ClientState* state = nullptr;
+    if (!ValidateSession(player, sessionId, state))
+    {
+        SendError(player, requestId, "SESSION");
+        return;
+    }
+
+    uint64 now = NowMs();
+    if (state->completedOperations.contains(requestId))
+    {
+        SendError(player, requestId, "DUPLICATE");
+        return;
+    }
+    if (state->lastOperationAtMs && now - state->lastOperationAtMs < MinOperationIntervalMs)
+    {
+        SendError(player, requestId, "THROTTLED");
+        return;
+    }
+    state->lastOperationAtMs = now;
+
+    struct OutfitChange
+    {
+        uint8 slot;
+        uint32 itemEntry;
+        Item* target;
+    };
+
+    std::vector<OutfitChange> changes;
+    std::unordered_set<uint8> usedSlots;
+    std::stringstream encodedChanges(parts[3]);
+    std::string encodedChange;
+    while (std::getline(encodedChanges, encodedChange, ','))
+    {
+        std::size_t separator = encodedChange.find(':');
+        uint32 slot = 0;
+        uint32 itemEntry = 0;
+        if (separator == std::string::npos || encodedChange.find(':', separator + 1) != std::string::npos ||
+            !ParseUnsigned(encodedChange.substr(0, separator), slot) ||
+            !ParseUnsigned(encodedChange.substr(separator + 1), itemEntry) ||
+            slot >= EQUIPMENT_SLOT_END || !itemEntry || !usedSlots.insert(static_cast<uint8>(slot)).second)
+        {
+            SendError(player, requestId, "SLOT");
+            return;
+        }
+        changes.push_back({ static_cast<uint8>(slot), itemEntry, nullptr });
+    }
+
+    if (changes.empty() || changes.size() > EQUIPMENT_SLOT_END)
+    {
+        SendError(player, requestId, "SLOT");
+        return;
+    }
+
+    uint32 accountId = player->GetSession()->GetAccountId();
+    auto collection = sTransmogrification->collectionCache.find(accountId);
+    if (!sTransmogrification->GetUseCollectionSystem())
+    {
+        SendError(player, requestId, "COLLECTION_DISABLED");
+        return;
+    }
+    if (collection == sTransmogrification->collectionCache.end())
+    {
+        SendError(player, requestId, "NOT_COLLECTED");
+        return;
+    }
+
+    uint64 totalCost = 0;
+    std::vector<OutfitChange> preparedChanges;
+    preparedChanges.reserve(changes.size());
+    for (OutfitChange& change : changes)
+    {
+        change.target = player->GetItemByPos(INVENTORY_SLOT_BAG_0, change.slot);
+        if (!change.target)
+        {
+            SendError(player, requestId, "EMPTY_SLOT");
+            return;
+        }
+
+        ItemTemplate const* appearance = sObjectMgr->GetItemTemplate(change.itemEntry);
+        if (!appearance || !collection->second.contains(change.itemEntry))
+        {
+            SendError(player, requestId, "NOT_COLLECTED");
+            return;
+        }
+        if (!sTransmogrification->CanTransmogrifyItemWithItem(player, change.target->GetTemplate(), appearance))
+        {
+            SendError(player, requestId, "TRANSMOG_3");
+            return;
+        }
+
+        if (sTransmogrification->GetFakeEntry(change.target->GetGUID()) == change.itemEntry)
+            continue;
+
+        totalCost += GetPrice(change.target->GetTemplate());
+        preparedChanges.push_back(change);
+    }
+
+    uint64 requiredTokens = uint64(sTransmogrification->GetTokenAmount()) * preparedChanges.size();
+    if (sTransmogrification->GetRequireToken() &&
+        (requiredTokens > std::numeric_limits<uint32>::max() ||
+         !player->HasItemCount(sTransmogrification->GetTokenEntry(), static_cast<uint32>(requiredTokens))))
+    {
+        SendError(player, requestId, "TRANSMOG_8");
+        return;
+    }
+    if (player->GetMoney() < totalCost)
+    {
+        SendError(player, requestId, "TRANSMOG_7");
+        return;
+    }
+
+    if (sTransmogrification->GetRequireToken() && requiredTokens)
+        player->DestroyItemCount(sTransmogrification->GetTokenEntry(), static_cast<uint32>(requiredTokens), true);
+    if (totalCost)
+        player->ModifyMoney(-static_cast<int64>(totalCost), false);
+
+    auto transaction = CharacterDatabase.BeginTransaction();
+    for (OutfitChange const& change : preparedChanges)
+    {
+        sTransmogrification->SetFakeEntry(player, change.itemEntry, change.slot, change.target, &transaction);
+        change.target->UpdatePlayedTime(player);
+        change.target->SetOwnerGUID(player->GetGUID());
+        change.target->SetNotRefundable(player);
+        change.target->ClearSoulboundTradeable(player);
+    }
+    if (!preparedChanges.empty())
+        CharacterDatabase.CommitTransaction(transaction);
+
+    state->completedOperations.insert(requestId);
+    state->lastListAtMs = 0;
+    Send(player, "RESULT\t" + std::to_string(requestId) + "\tOK\tOUTFIT\t" +
+        std::to_string(preparedChanges.size()) + "\t" + std::to_string(player->GetMoney()));
+    SendSlotStates(player);
+}
+
 void HandleRemove(Player* player, std::vector<std::string> const& parts)
 {
     uint32 requestId = 0;
@@ -517,6 +659,8 @@ bool HandleMessage(Player* player, std::string const& message)
         HandleList(player, parts);
     else if (parts[0] == "APPLY" && IsEnabled())
         HandleApply(player, parts);
+    else if (parts[0] == "APPLY_OUTFIT" && IsEnabled())
+        HandleApplyOutfit(player, parts);
     else if (parts[0] == "REMOVE" && IsEnabled())
         HandleRemove(player, parts);
     else if (parts[0] == "REMOVE_ALL" && IsEnabled())

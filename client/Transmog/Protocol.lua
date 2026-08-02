@@ -2,7 +2,7 @@ ACoreTransmog = ACoreTransmog or {}
 
 local Addon = ACoreTransmog
 local PREFIX = "AC_TRANSMOG"
-local VERSION = 2
+local VERSION = 3
 
 Addon.connected = false
 Addon.sessionId = nil
@@ -73,6 +73,26 @@ function Addon:Apply(slot, itemEntry)
     self.UI:SetBusy(true)
     self.UI:SetStatus(ACoreTransmogLocale.APPLYING, 1, 0.82, 0)
     self:Send(string.format("APPLY\t%d\t%d\t%d\t%d", requestId, self.sessionId, slot, itemEntry))
+end
+
+function Addon:ApplyOutfit()
+    if not self.sessionId or self:GetDraftCount() == 0 then return end
+
+    local slots = {}
+    for slot in pairs(self.draftSlots) do
+        table.insert(slots, slot)
+    end
+    table.sort(slots)
+
+    local changes = {}
+    for _, slot in ipairs(slots) do
+        table.insert(changes, slot .. ":" .. self.draftSlots[slot])
+    end
+
+    local requestId = self:NextRequestId()
+    self.UI:SetBusy(true)
+    self.UI:SetStatus(ACoreTransmogLocale.APPLYING_OUTFIT, 1, 0.82, 0)
+    self:Send(string.format("APPLY_OUTFIT\t%d\t%d\t%s", requestId, self.sessionId, table.concat(changes, ",")))
 end
 
 function Addon:Remove(slot)
@@ -236,9 +256,13 @@ function Addon:HandleProtocolMessage(message)
         if parts[3] == "OK" then
             local slot = tonumber(parts[4])
             local itemEntry = tonumber(parts[5]) or 0
-            if slot == 255 then
+            if parts[4] == "OUTFIT" then
+                self.UI.pendingResultStatus = string.format(ACoreTransmogLocale.OUTFIT_APPLIED, itemEntry)
+                self:ClearDraft()
+            elseif slot == 255 then
                 self.transmogSlots = {}
                 self.UI.pendingResultStatus = ACoreTransmogLocale.RESET_ALL_SUCCESS
+                self:ClearDraft()
             elseif slot then
                 self.transmogSlots[slot] = itemEntry ~= 0 and itemEntry or nil
                 self.UI.pendingResultStatus = itemEntry == 0 and ACoreTransmogLocale.REMOVED or ACoreTransmogLocale.APPLIED

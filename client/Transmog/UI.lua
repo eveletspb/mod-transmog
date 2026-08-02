@@ -151,6 +151,9 @@ function UI:CreateSlotButton(parent, slot, side, index)
     transmogGlow:Hide()
     button.transmogGlow = transmogGlow
 
+    button.draftOutline = AddOutline(button, 2, 0.2, 0.72, 1, 1)
+    SetOutlineShown(button.draftOutline, false)
+
     button.selectedOutline = AddOutline(button, 2, 1, 0.72, 0.15, 1)
     SetOutlineShown(button.selectedOutline, false)
 
@@ -160,6 +163,13 @@ function UI:CreateSlotButton(parent, slot, side, index)
     transmogMarker:SetPoint("BOTTOMRIGHT", -3, 3)
     transmogMarker:Hide()
     button.transmogMarker = transmogMarker
+
+    local draftMarker = AddSolidTexture(button, "OVERLAY", 0.2, 0.72, 1, 1)
+    draftMarker:SetWidth(10)
+    draftMarker:SetHeight(10)
+    draftMarker:SetPoint("TOPLEFT", 3, -3)
+    draftMarker:Hide()
+    button.draftMarker = draftMarker
 
     local highlight = AddSolidTexture(button, "HIGHLIGHT", 1, 0.82, 0.32, 0.16)
     highlight:SetPoint("TOPLEFT", 2, -2)
@@ -173,6 +183,7 @@ function UI:CreateSlotButton(parent, slot, side, index)
     end)
 
     button:SetScript("OnClick", function(self)
+        if UI.busy then return end
         UI:SelectSlot(self.slot)
     end)
     button:SetScript("OnEnter", function(self)
@@ -181,6 +192,9 @@ function UI:CreateSlotButton(parent, slot, side, index)
         GameTooltip:SetInventoryItem("player", self.slot + 1)
         if Addon.transmogSlots and Addon.transmogSlots[self.slot] then
             GameTooltip:AddLine(L.SLOT_TRANSMOGRIFIED, 1, 0.72, 0.16)
+        end
+        if Addon.draftSlots and Addon.draftSlots[self.slot] then
+            GameTooltip:AddLine(L.SLOT_IN_DRAFT, 0.2, 0.72, 1)
         end
         GameTooltip:Show()
     end)
@@ -225,13 +239,15 @@ function UI:CreateItemButton(parent, index)
     button.currentMarker = current
 
     button:SetScript("OnClick", function(self)
-        if not self.itemEntry then
+        if UI.busy or not self.itemEntry then
             return
         end
         UI.selectedEntry = self.itemEntry
         UI:UpdateSelection()
         UI:UpdateSelectedItemText()
-        local previewed, errorMessage = pcall(function() Addon:PreviewItem(self.itemEntry) end)
+        local previewed, errorMessage = pcall(function()
+            Addon:SetDraftAppearance(UI.selectedSlot, self.itemEntry)
+        end)
         if not previewed then
             DEFAULT_CHAT_FRAME:AddMessage("|cffff4040ACore Transmog preview error:|r " .. tostring(errorMessage))
         end
@@ -277,7 +293,10 @@ function UI:Create()
     frame:Hide()
 
     table.insert(UISpecialFrames, "ACoreTransmogFrame")
-    frame:SetScript("OnHide", function() Addon:CloseSession() end)
+    frame:SetScript("OnHide", function()
+        Addon:ClearDraft()
+        Addon:CloseSession()
+    end)
 
     local header = AddSolidTexture(frame, "BACKGROUND", 0.045, 0.052, 0.07, 1)
     header:SetPoint("TOPLEFT", 10, -10)
@@ -345,10 +364,7 @@ function UI:Create()
     local resetPreview = CreateButton(previewPanel, L.RESET_PREVIEW, 145, 24)
     resetPreview:SetPoint("BOTTOMLEFT", 16, 12)
     resetPreview:SetScript("OnClick", function()
-        self.selectedEntry = nil
-        Addon:ResetPreview()
-        self:UpdateSelection()
-        self:UpdateSelectedItemText()
+        Addon:ClearDraft()
     end)
 
     local resetAll = CreateButton(previewPanel, L.RESET_ALL, 145, 24)
@@ -369,7 +385,7 @@ function UI:Create()
     local collectionPanel = CreatePanel(frame, COLLECTION_WIDTH, PANEL_HEIGHT)
     collectionPanel:SetPoint("TOPRIGHT", -18, -62)
     collectionPanel:SetScript("OnUpdate", function(self, elapsed)
-        if not UI.hasMissingItemInfo or (UI.itemInfoRefreshAttempts or 0) >= 20 then
+        if (not UI.hasMissingItemInfo and not Addon.pendingDraftPreview) or (UI.itemInfoRefreshAttempts or 0) >= 20 then
             return
         end
         self.itemInfoElapsed = (self.itemInfoElapsed or 0) + elapsed
@@ -466,21 +482,21 @@ function UI:Create()
 
     local status = collectionPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     status:SetPoint("BOTTOMLEFT", 24, 14)
-    status:SetWidth(260)
+    status:SetWidth(250)
     status:SetHeight(28)
     status:SetJustifyH("LEFT")
     status:SetJustifyV("MIDDLE")
 
     local remove = CreateButton(collectionPanel, L.REMOVE, 112, 28)
-    remove:SetPoint("BOTTOMRIGHT", -176, 14)
+    remove:SetPoint("BOTTOMRIGHT", -194, 14)
     remove:SetScript("OnClick", function()
         if UI.selectedSlot then Addon:Remove(UI.selectedSlot) end
     end)
 
-    local apply = CreateButton(collectionPanel, L.APPLY, 142, 28)
+    local apply = CreateButton(collectionPanel, L.APPLY, 160, 28)
     apply:SetPoint("BOTTOMRIGHT", -24, 14)
     apply:SetScript("OnClick", function()
-        if UI.selectedEntry then Addon:Apply(UI.selectedSlot, UI.selectedEntry) end
+        Addon:ApplyOutfit()
     end)
 
     self.frame = frame
@@ -496,14 +512,16 @@ function UI:Create()
     self.apply = apply
     self.remove = remove
     self.resetAll = resetAll
+    self.cancelDraft = resetPreview
     self.status = status
     self.gridOverlay = gridOverlay
 end
 
 function UI:Open()
     self:Create()
+    self.busy = false
     self.frame:Show()
-    Addon:ResetPreview()
+    Addon:ClearDraft()
     self:RefreshSlotIcons()
 
     local initialSlot = self.selectedSlot
@@ -542,9 +560,11 @@ function UI:UpdateTransmogSlotMarkers()
     if not self.slotButtons then return end
     for slot, button in pairs(self.slotButtons) do
         local hasTransmog = Addon.transmogSlots and Addon.transmogSlots[slot] ~= nil
-        SetOutlineShown(button.transmogOutline, hasTransmog and slot ~= self.selectedSlot)
-        button.transmogActive = hasTransmog
-        if hasTransmog then
+        local hasDraft = Addon.draftSlots and Addon.draftSlots[slot] ~= nil
+        SetOutlineShown(button.transmogOutline, hasTransmog and not hasDraft and slot ~= self.selectedSlot)
+        SetOutlineShown(button.draftOutline, hasDraft and slot ~= self.selectedSlot)
+        button.transmogActive = hasTransmog and not hasDraft
+        if button.transmogActive then
             button.transmogGlow:Show()
             button.transmogMarker:Show()
         else
@@ -552,22 +572,24 @@ function UI:UpdateTransmogSlotMarkers()
             button.transmogGlow:Hide()
             button.transmogMarker:Hide()
         end
+        if hasDraft then button.draftMarker:Show() else button.draftMarker:Hide() end
     end
     if self.resetAll then
-        SetButtonEnabled(self.resetAll, Addon.transmogSlots and next(Addon.transmogSlots) ~= nil)
+        SetButtonEnabled(self.resetAll, not self.busy and Addon.transmogSlots and next(Addon.transmogSlots) ~= nil)
     end
 end
 
 function UI:SelectSlot(slot)
+    if self.busy then return end
     self.selectedSlot = slot
-    self.selectedEntry = nil
-    Addon.pendingPreviewEntry = nil
+    self.selectedEntry = Addon.draftSlots and Addon.draftSlots[slot] or nil
+    Addon.pendingDraftPreview = false
     for slotId, button in pairs(self.slotButtons) do
         SetOutlineShown(button.selectedOutline, slotId == slot)
     end
     self:UpdateTransmogSlotMarkers()
     self.slotTitle:SetText(L["SLOT_" .. slot] or tostring(slot))
-    Addon:ResetPreview()
+    Addon:PreviewDraft()
     self:UpdateSelectedItemText()
     self:RequestPage(0)
 end
@@ -578,8 +600,8 @@ function UI:RequestPage(page)
 end
 
 function UI:RefreshCurrentPage()
-    Addon.pendingPreviewEntry = nil
-    Addon:ResetPreview()
+    Addon.pendingDraftPreview = false
+    Addon:PreviewDraft()
     self:RefreshSlotIcons()
     self:UpdateSelectedItemText()
     self:RequestPage(self.page or 0)
@@ -597,9 +619,11 @@ function UI:SetLoading(loading)
 end
 
 function UI:SetBusy(busy)
-    SetButtonEnabled(self.apply, not busy and self.selectedEntry ~= nil and self.selectedEntry ~= self.currentEntry)
+    self.busy = busy
+    SetButtonEnabled(self.apply, not busy and Addon:GetDraftCount() > 0)
     SetButtonEnabled(self.remove, not busy and (self.currentEntry or 0) ~= 0)
     SetButtonEnabled(self.resetAll, not busy and Addon.transmogSlots and next(Addon.transmogSlots) ~= nil)
+    SetButtonEnabled(self.cancelDraft, not busy and Addon:GetDraftCount() > 0)
 end
 
 function UI:SetStatus(text, red, green, blue)
@@ -612,7 +636,27 @@ function UI:UpdateSelection()
     for _, button in ipairs(self.itemButtons) do
         SetOutlineShown(button.selectionOutline, button.itemEntry ~= nil and button.itemEntry == self.selectedEntry)
     end
-    SetButtonEnabled(self.apply, self.selectedEntry ~= nil and self.selectedEntry ~= self.currentEntry)
+    SetButtonEnabled(self.apply, not self.busy and Addon:GetDraftCount() > 0)
+end
+
+function UI:UpdateDraftState()
+    if not self.frame then return end
+
+    local count = 0
+    local totalPrice = 0
+    for slot in pairs(Addon.draftSlots or {}) do
+        count = count + 1
+        totalPrice = totalPrice + ((self.slotPrices and self.slotPrices[slot]) or 0)
+    end
+
+    self:UpdateTransmogSlotMarkers()
+    SetButtonEnabled(self.apply, not self.busy and count > 0)
+    SetButtonEnabled(self.cancelDraft, not self.busy and count > 0)
+    if count > 0 then
+        self.priceText:SetText(string.format(L.OUTFIT_PRICE, count) .. " " .. GetCoinTextureString(totalPrice))
+    else
+        self.priceText:SetText(L.PRICE .. " " .. GetCoinTextureString(self.currentPrice or 0))
+    end
 end
 
 function UI:UpdateSelectedItemText()
@@ -647,13 +691,10 @@ function UI:RefreshItemInfo()
         end
     end
     self:UpdateSelectedItemText()
-    if Addon.pendingPreviewEntry then
-        local _, link = GetItemInfo("item:" .. Addon.pendingPreviewEntry)
-        if link then
-            local previewed, errorMessage = pcall(function() Addon:PreviewItem(Addon.pendingPreviewEntry) end)
-            if not previewed then
-                DEFAULT_CHAT_FRAME:AddMessage("|cffff4040ACore Transmog preview error:|r " .. tostring(errorMessage))
-            end
+    if Addon.pendingDraftPreview then
+        local previewed, errorMessage = pcall(function() Addon:PreviewDraft() end)
+        if not previewed then
+            DEFAULT_CHAT_FRAME:AddMessage("|cffff4040ACore Transmog preview error:|r " .. tostring(errorMessage))
         end
     end
 end
@@ -663,23 +704,13 @@ function UI:ShowPage(meta, items)
     self.page = meta.page
     self.pageCount = meta.pageCount
     self.currentEntry = meta.current
+    self.currentPrice = meta.price or 0
+    self.slotPrices = self.slotPrices or {}
+    self.slotPrices[meta.slot] = self.currentPrice
     Addon.transmogSlots[meta.slot] = meta.current ~= 0 and meta.current or nil
     self:UpdateTransmogSlotMarkers()
     self.hasMissingItemInfo = false
     self.itemInfoRefreshAttempts = 0
-
-    local selectionIsVisible = self.selectedEntry == nil
-    if self.selectedEntry then
-        for _, itemEntry in ipairs(items) do
-            if itemEntry == self.selectedEntry then
-                selectionIsVisible = true
-                break
-            end
-        end
-    end
-    if not selectionIsVisible then
-        self.selectedEntry = nil
-    end
 
     for index, button in ipairs(self.itemButtons) do
         local itemEntry = items[index]
@@ -703,7 +734,7 @@ function UI:ShowPage(meta, items)
     SetButtonEnabled(self.previous, meta.page > 0)
     SetButtonEnabled(self.next, meta.page + 1 < meta.pageCount)
     self.pageText:SetText(string.format(L.PAGE, meta.page + 1, meta.pageCount, meta.total))
-    self.priceText:SetText(L.PRICE .. " " .. GetCoinTextureString(meta.price or 0))
+    self:UpdateDraftState()
     SetButtonEnabled(self.remove, (meta.current or 0) ~= 0)
     if self.pendingResultStatus then
         self:SetStatus(self.pendingResultStatus, 0.3, 1, 0.3)
