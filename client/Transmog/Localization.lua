@@ -31,6 +31,7 @@ ACoreTransmogLocale = {
     REMOVED = "Transmogrification removed.",
     SLOT_TRANSMOGRIFIED = "Appearance applied",
     SLOT_IN_DRAFT = "Changed in outfit draft",
+    SLOT_REMOVAL_DRAFT = "Appearance will be removed",
     OUTFIT_PRICE = "%d changes, total:",
     ERROR_SESSION = "The transmogrifier session has expired. Talk to the NPC again.",
     ERROR_THROTTLED = "Please wait before trying again.",
@@ -96,6 +97,7 @@ if GetLocale() == "ruRU" then
     L.REMOVED = "Трансмогрификация снята."
     L.SLOT_TRANSMOGRIFIED = "Облик применён"
     L.SLOT_IN_DRAFT = "Изменено в черновике образа"
+    L.SLOT_REMOVAL_DRAFT = "Облик будет снят"
     L.OUTFIT_PRICE = "Изменений: %d, итого:"
     L.ERROR_SESSION = "Сессия истекла. Снова поговорите с NPC."
     L.ERROR_THROTTLED = "Подождите перед следующим запросом."

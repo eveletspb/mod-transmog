@@ -194,7 +194,11 @@ function UI:CreateSlotButton(parent, slot, side, index)
             GameTooltip:AddLine(L.SLOT_TRANSMOGRIFIED, 1, 0.72, 0.16)
         end
         if Addon.draftSlots and Addon.draftSlots[self.slot] then
-            GameTooltip:AddLine(L.SLOT_IN_DRAFT, 0.2, 0.72, 1)
+            if Addon.draftSlots[self.slot] == 0 then
+                GameTooltip:AddLine(L.SLOT_REMOVAL_DRAFT, 1, 0.28, 0.2)
+            else
+                GameTooltip:AddLine(L.SLOT_IN_DRAFT, 0.2, 0.72, 1)
+            end
         end
         GameTooltip:Show()
     end)
@@ -490,7 +494,7 @@ function UI:Create()
     local remove = CreateButton(collectionPanel, L.REMOVE, 112, 28)
     remove:SetPoint("BOTTOMRIGHT", -194, 14)
     remove:SetScript("OnClick", function()
-        if UI.selectedSlot then Addon:Remove(UI.selectedSlot) end
+        if UI.selectedSlot then Addon:SetDraftRemoval(UI.selectedSlot) end
     end)
 
     local apply = CreateButton(collectionPanel, L.APPLY, 160, 28)
@@ -561,8 +565,16 @@ function UI:UpdateTransmogSlotMarkers()
     for slot, button in pairs(self.slotButtons) do
         local hasTransmog = Addon.transmogSlots and Addon.transmogSlots[slot] ~= nil
         local hasDraft = Addon.draftSlots and Addon.draftSlots[slot] ~= nil
+        local removesTransmog = hasDraft and Addon.draftSlots[slot] == 0
         SetOutlineShown(button.transmogOutline, hasTransmog and not hasDraft and slot ~= self.selectedSlot)
         SetOutlineShown(button.draftOutline, hasDraft and slot ~= self.selectedSlot)
+        for _, texture in pairs(button.draftOutline) do
+            if removesTransmog then
+                texture:SetTexture(1, 0.28, 0.2, 1)
+            else
+                texture:SetTexture(0.2, 0.72, 1, 1)
+            end
+        end
         button.transmogActive = hasTransmog and not hasDraft
         if button.transmogActive then
             button.transmogGlow:Show()
@@ -572,7 +584,16 @@ function UI:UpdateTransmogSlotMarkers()
             button.transmogGlow:Hide()
             button.transmogMarker:Hide()
         end
-        if hasDraft then button.draftMarker:Show() else button.draftMarker:Hide() end
+        if hasDraft then
+            if removesTransmog then
+                button.draftMarker:SetTexture(1, 0.28, 0.2, 1)
+            else
+                button.draftMarker:SetTexture(0.2, 0.72, 1, 1)
+            end
+            button.draftMarker:Show()
+        else
+            button.draftMarker:Hide()
+        end
     end
     if self.resetAll then
         SetButtonEnabled(self.resetAll, not self.busy and Addon.transmogSlots and next(Addon.transmogSlots) ~= nil)
@@ -621,7 +642,7 @@ end
 function UI:SetBusy(busy)
     self.busy = busy
     SetButtonEnabled(self.apply, not busy and Addon:GetDraftCount() > 0)
-    SetButtonEnabled(self.remove, not busy and (self.currentEntry or 0) ~= 0)
+    SetButtonEnabled(self.remove, not busy and ((self.currentEntry or 0) ~= 0 or Addon.draftSlots[self.selectedSlot] ~= nil))
     SetButtonEnabled(self.resetAll, not busy and Addon.transmogSlots and next(Addon.transmogSlots) ~= nil)
     SetButtonEnabled(self.cancelDraft, not busy and Addon:GetDraftCount() > 0)
 end
@@ -646,12 +667,15 @@ function UI:UpdateDraftState()
     local totalPrice = 0
     for slot in pairs(Addon.draftSlots or {}) do
         count = count + 1
-        totalPrice = totalPrice + ((self.slotPrices and self.slotPrices[slot]) or 0)
+        if Addon.draftSlots[slot] ~= 0 then
+            totalPrice = totalPrice + ((self.slotPrices and self.slotPrices[slot]) or 0)
+        end
     end
 
     self:UpdateTransmogSlotMarkers()
     SetButtonEnabled(self.apply, not self.busy and count > 0)
     SetButtonEnabled(self.cancelDraft, not self.busy and count > 0)
+    SetButtonEnabled(self.remove, not self.busy and ((self.currentEntry or 0) ~= 0 or Addon.draftSlots[self.selectedSlot] ~= nil))
     if count > 0 then
         self.priceText:SetText(string.format(L.OUTFIT_PRICE, count) .. " " .. GetCoinTextureString(totalPrice))
     else
@@ -735,7 +759,7 @@ function UI:ShowPage(meta, items)
     SetButtonEnabled(self.next, meta.page + 1 < meta.pageCount)
     self.pageText:SetText(string.format(L.PAGE, meta.page + 1, meta.pageCount, meta.total))
     self:UpdateDraftState()
-    SetButtonEnabled(self.remove, (meta.current or 0) ~= 0)
+    SetButtonEnabled(self.remove, (meta.current or 0) ~= 0 or Addon.draftSlots[meta.slot] ~= nil)
     if self.pendingResultStatus then
         self:SetStatus(self.pendingResultStatus, 0.3, 1, 0.3)
         self.pendingResultStatus = nil

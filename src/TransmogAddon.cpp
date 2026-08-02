@@ -420,7 +420,7 @@ void HandleApplyOutfit(Player* player, std::vector<std::string> const& parts)
         if (separator == std::string::npos || encodedChange.find(':', separator + 1) != std::string::npos ||
             !ParseUnsigned(encodedChange.substr(0, separator), slot) ||
             !ParseUnsigned(encodedChange.substr(separator + 1), itemEntry) ||
-            slot >= EQUIPMENT_SLOT_END || !itemEntry || !usedSlots.insert(static_cast<uint8>(slot)).second)
+            slot >= EQUIPMENT_SLOT_END || !usedSlots.insert(static_cast<uint8>(slot)).second)
         {
             SendError(player, requestId, "SLOT");
             return;
@@ -441,13 +441,8 @@ void HandleApplyOutfit(Player* player, std::vector<std::string> const& parts)
         SendError(player, requestId, "COLLECTION_DISABLED");
         return;
     }
-    if (collection == sTransmogrification->collectionCache.end())
-    {
-        SendError(player, requestId, "NOT_COLLECTED");
-        return;
-    }
-
     uint64 totalCost = 0;
+    uint32 paidChangeCount = 0;
     std::vector<OutfitChange> preparedChanges;
     preparedChanges.reserve(changes.size());
     for (OutfitChange& change : changes)
@@ -459,8 +454,17 @@ void HandleApplyOutfit(Player* player, std::vector<std::string> const& parts)
             return;
         }
 
+        if (!change.itemEntry)
+        {
+            if (!sTransmogrification->GetFakeEntry(change.target->GetGUID()))
+                continue;
+            preparedChanges.push_back(change);
+            continue;
+        }
+
         ItemTemplate const* appearance = sObjectMgr->GetItemTemplate(change.itemEntry);
-        if (!appearance || !collection->second.contains(change.itemEntry))
+        if (!appearance || collection == sTransmogrification->collectionCache.end() ||
+            !collection->second.contains(change.itemEntry))
         {
             SendError(player, requestId, "NOT_COLLECTED");
             return;
@@ -475,10 +479,11 @@ void HandleApplyOutfit(Player* player, std::vector<std::string> const& parts)
             continue;
 
         totalCost += GetPrice(change.target->GetTemplate());
+        ++paidChangeCount;
         preparedChanges.push_back(change);
     }
 
-    uint64 requiredTokens = uint64(sTransmogrification->GetTokenAmount()) * preparedChanges.size();
+    uint64 requiredTokens = uint64(sTransmogrification->GetTokenAmount()) * paidChangeCount;
     if (sTransmogrification->GetRequireToken() &&
         (requiredTokens > std::numeric_limits<uint32>::max() ||
          !player->HasItemCount(sTransmogrification->GetTokenEntry(), static_cast<uint32>(requiredTokens))))
@@ -500,11 +505,16 @@ void HandleApplyOutfit(Player* player, std::vector<std::string> const& parts)
     auto transaction = CharacterDatabase.BeginTransaction();
     for (OutfitChange const& change : preparedChanges)
     {
-        sTransmogrification->SetFakeEntry(player, change.itemEntry, change.slot, change.target, &transaction);
-        change.target->UpdatePlayedTime(player);
-        change.target->SetOwnerGUID(player->GetGUID());
-        change.target->SetNotRefundable(player);
-        change.target->ClearSoulboundTradeable(player);
+        if (change.itemEntry)
+        {
+            sTransmogrification->SetFakeEntry(player, change.itemEntry, change.slot, change.target, &transaction);
+            change.target->UpdatePlayedTime(player);
+            change.target->SetOwnerGUID(player->GetGUID());
+            change.target->SetNotRefundable(player);
+            change.target->ClearSoulboundTradeable(player);
+        }
+        else
+            sTransmogrification->DeleteFakeEntry(player, change.slot, change.target, &transaction);
     }
     if (!preparedChanges.empty())
         CharacterDatabase.CommitTransaction(transaction);

@@ -26,8 +26,14 @@ function Addon:PreviewDraft()
     self.UI.model:Show()
     self.pendingDraftPreview = false
 
-    for _, itemEntry in pairs(self.draftSlots) do
-        local _, link = GetItemInfo("item:" .. itemEntry)
+    for slot, itemEntry in pairs(self.draftSlots) do
+        local link
+        if itemEntry == 0 then
+            link = GetInventoryItemLink("player", slot + 1)
+        else
+            local _, itemLink = GetItemInfo("item:" .. itemEntry)
+            link = itemLink
+        end
         if link then
             self.UI.model:TryOn(link)
         else
@@ -57,6 +63,25 @@ function Addon:SetDraftAppearance(slot, itemEntry)
     end
     self:PreviewDraft()
     if self.UI then self.UI:UpdateDraftState() end
+end
+
+function Addon:SetDraftRemoval(slot)
+    if slot == nil then return end
+
+    if self.draftSlots[slot] == 0 then
+        self.draftSlots[slot] = nil
+    elseif self.transmogSlots[slot] then
+        self.draftSlots[slot] = 0
+    else
+        self.draftSlots[slot] = nil
+    end
+    self:PreviewDraft()
+    if self.UI then
+        self.UI.selectedEntry = nil
+        self.UI:UpdateDraftState()
+        self.UI:UpdateSelection()
+        self.UI:UpdateSelectedItemText()
+    end
 end
 
 function Addon:ClearDraft()
