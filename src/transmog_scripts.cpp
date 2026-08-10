@@ -20,6 +20,7 @@ Cant transmogrify rediculus items // Foereaper: would be fun to stab people with
 -- Cant think of any good way to handle this easily, could rip flagged items from cata DB
 */
 #include "Transmogrification.h"
+#include "TransmogAddon.h"
 #include "Chat.h"
 #include "ScriptedCreature.h"
 #include "ItemTemplate.h"
@@ -203,6 +204,12 @@ public:
 
         // Clear the search string for the player
         sT->searchStringByPlayer.erase(player->GetGUID().GetCounter());
+
+        if (TransmogAddon::TryOpen(player, creature))
+        {
+            CloseGossipMenuFor(player);
+            return true;
+        }
 
         if (sT->GetEnableTransmogInfo())
             AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG, "|TInterface/ICONS/INV_Misc_Book_11:30:30:-18:0|t" + Tstr(session, LANG_TRANSMOG_HOWWORKS), EQUIPMENT_SLOT_END + 9, 0);
@@ -687,11 +694,35 @@ public:
     }
 };
 
+class transmog_addon_player_script : public PlayerScript
+{
+public:
+    transmog_addon_player_script() : PlayerScript("transmog_addon_player_script", {
+        PLAYERHOOK_CAN_PLAYER_USE_PRIVATE_CHAT,
+        PLAYERHOOK_ON_LOGOUT
+    }) { }
+
+    bool OnPlayerCanUseChat(Player* player, uint32 /*type*/, uint32 language, std::string& message, Player* receiver) override
+    {
+        if (language != LANG_ADDON || player != receiver)
+            return true;
+
+        return !TransmogAddon::HandleMessage(player, message);
+    }
+
+    void OnPlayerLogout(Player* player) override
+    {
+        TransmogAddon::OnLogout(player);
+    }
+};
+
 class PS_Transmogrification : public PlayerScript
 {
 private:
     void AddToDatabase(Player* player, Item* item)
     {
+        if (!item)
+            return;
         if (item->HasFlag(ITEM_FIELD_FLAGS, ITEM_FIELD_FLAG_BOP_TRADEABLE) && !sTransmogrification->GetAllowTradeable())
             return;
         if (item->HasFlag(ITEM_FIELD_FLAGS, ITEM_FIELD_FLAG_REFUNDABLE))
@@ -703,6 +734,34 @@ private:
     void AddToDatabase(Player* player, ItemTemplate const* itemTemplate)
     {
         sT->AddToDatabase(player, itemTemplate);
+    }
+
+    void CollectInventoryAppearances(Player* player)
+    {
+        if (!player || !sT->GetUseCollectionSystem() || !sT->GetAutoCollectInventoryAppearances())
+            return;
+
+        auto collectSlot = [player](uint8 bag, uint8 slot)
+        {
+            // Resolve the current item from the player's inventory for every operation. Never retain
+            // an Item pointer between hooks: another module may sell or destroy the item afterwards.
+            if (Item* item = player->GetItemByPos(bag, slot))
+                sT->ClaimAppearance(player, item, ClaimAppearanceMode::Automatic);
+        };
+
+        for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+            collectSlot(INVENTORY_SLOT_BAG_0, slot);
+
+        for (uint8 bagPos = INVENTORY_SLOT_BAG_START; bagPos < INVENTORY_SLOT_BAG_END; ++bagPos)
+        {
+            Bag* bag = player->GetBagByPos(bagPos);
+            if (!bag)
+                continue;
+
+            uint32 bagSize = bag->GetBagSize();
+            for (uint32 slot = 0; slot < bagSize; ++slot)
+                collectSlot(bagPos, slot);
+        }
     }
 
     void CheckRetroActiveInventoryAppearances(Player* player)
@@ -775,6 +834,7 @@ public:
     PS_Transmogrification() : PlayerScript("Player_Transmogrify", {
         PLAYERHOOK_ON_EQUIP,
         PLAYERHOOK_ON_LOOT_ITEM,
+        PLAYERHOOK_ON_STORE_NEW_ITEM,
         PLAYERHOOK_ON_CREATE_ITEM,
         PLAYERHOOK_ON_AFTER_STORE_OR_EQUIP_NEW_ITEM,
         PLAYERHOOK_ON_PLAYER_COMPLETE_QUEST,
@@ -794,7 +854,9 @@ public:
 
     void OnPlayerLootItem(Player* player, Item* item, uint32 /*count*/, ObjectGuid /*lootguid*/) override
     {
-        if (!sT->GetUseCollectionSystem() || !item || typeid(*item) != typeid(Item))
+        if (!sT->GetUseCollectionSystem() || sT->GetAutoCollectInventoryAppearances())
+            return;
+        if (!item || typeid(*item) != typeid(Item))
             return;
         if (item->GetTemplate()->Bonding == ItemBondingType::BIND_WHEN_PICKED_UP || item->IsSoulBound())
         {
@@ -802,9 +864,16 @@ public:
         }
     }
 
+    void OnPlayerStoreNewItem(Player* player, Item* /*item*/, uint32 /*count*/) override
+    {
+        // The hook Item pointer is intentionally ignored. A synchronous inventory scan only uses
+        // objects that are still owned by the player, which is safe with deferred auto-sell modules.
+        CollectInventoryAppearances(player);
+    }
+
     void OnPlayerCreateItem(Player* player, Item* item, uint32 /*count*/) override
     {
-        if (!sT->GetUseCollectionSystem())
+        if (!sT->GetUseCollectionSystem() || sT->GetAutoCollectInventoryAppearances())
             return;
         if (item->GetTemplate()->Bonding == ItemBondingType::BIND_WHEN_PICKED_UP || item->IsSoulBound())
         {
@@ -814,7 +883,7 @@ public:
 
     void OnPlayerAfterStoreOrEquipNewItem(Player* player, uint32 /*vendorslot*/, Item* item, uint8 /*count*/, uint8 /*bag*/, uint8 /*slot*/, ItemTemplate const* /*pProto*/, Creature* /*pVendor*/, VendorItem const* /*crItem*/, bool /*bStore*/) override
     {
-        if (!sT->GetUseCollectionSystem())
+        if (!sT->GetUseCollectionSystem() || sT->GetAutoCollectInventoryAppearances())
             return;
         if (item->GetTemplate()->Bonding == ItemBondingType::BIND_WHEN_PICKED_UP || item->IsSoulBound())
         {
@@ -865,6 +934,10 @@ public:
     {
         if (sT->EnableResetRetroActiveAppearances())
             player->UpdatePlayerSetting("mod-transmog", SETTING_RETROACTIVE_CHECK, 0);
+
+        // Run before the legacy retroactive backfill so eligible BOE items follow the configured
+        // automatic binding policy instead of being inserted directly into the collection.
+        CollectInventoryAppearances(player);
 
         if (sT->EnableRetroActiveAppearances() && !(player->GetPlayerSetting("mod-transmog", SETTING_RETROACTIVE_CHECK).value))
             CheckRetroActiveQuestAppearances(player);
@@ -1026,6 +1099,7 @@ void AddSC_Transmog()
     new global_transmog_script();
     new unit_transmog_script();
     new npc_transmogrifier();
+    new transmog_addon_player_script();
     new PS_Transmogrification();
     new WS_Transmogrification();
 }

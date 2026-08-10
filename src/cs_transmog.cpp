@@ -314,43 +314,6 @@ public:
         return true;
     };
 
-    enum class ClaimResult
-    {
-        Claimed,
-        AlreadyOwned,
-        Unsuitable
-    };
-
-    // Binds the item to the player, strips its refundable/BoP-tradeable flags and unlocks its
-    // appearance in the account collection. Sends no feedback of its own; the caller decides what to
-    // report. AddToDatabase shows the per-item "new appearance" message when the appearance is new.
-    static ClaimResult TryClaimItem(Player* player, Item* item)
-    {
-        ItemTemplate const* itemTemplate = item->GetTemplate();
-
-        // Only allow claiming if the character could actually equip the item.
-        if (!sTransmogrification->SuitableForTransmogrification(player, itemTemplate))
-            return ClaimResult::Unsuitable;
-
-        uint32 accountId = player->GetSession()->GetAccountId();
-        auto accIt = sTransmogrification->collectionCache.find(accountId);
-        if (accIt != sTransmogrification->collectionCache.end() && accIt->second.contains(itemTemplate->ItemId))
-            return ClaimResult::AlreadyOwned;
-
-        // Claim the physical item: bind it to the player and drop the refundable/BoP-tradeable flags
-        // so the appearance can't be collected and then refunded to a vendor or traded away.
-        item->SetOwnerGUID(player->GetGUID());
-        item->SetNotRefundable(player);
-        if (!sTransmogrification->GetAllowTradeable())
-            item->ClearSoulboundTradeable(player);
-        item->SetBinding(true);
-        item->SetState(ITEM_CHANGED, player);
-
-        // Unlock the appearance and show the "added to your appearance collection" message (LANG_TRANSMOG_ADDED_APPEARANCE).
-        sTransmogrification->AddToDatabase(player, itemTemplate);
-        return ClaimResult::Claimed;
-    }
-
     // Claims item appearances held in the player's bags without having to equip them. Forms:
     //   .transmog claim [item link]  - first instance of that item in the player's bags
     //   .transmog claim <bag> <slot> - WoW client numbering: bag 0 = backpack, 1-4 = equipped bags,
@@ -376,7 +339,7 @@ public:
 
             auto claimSlot = [&](Item* bagItem)
             {
-                if (bagItem && TryClaimItem(player, bagItem) == ClaimResult::Claimed)
+                if (bagItem && sTransmogrification->ClaimAppearance(player, bagItem, ClaimAppearanceMode::Explicit) == ClaimAppearanceResult::Claimed)
                     ++claimed;
             };
 
@@ -492,18 +455,21 @@ public:
             }
         }
 
-        switch (TryClaimItem(player, item))
+        switch (sTransmogrification->ClaimAppearance(player, item, ClaimAppearanceMode::Explicit))
         {
-            case ClaimResult::Unsuitable:
+            case ClaimAppearanceResult::Unsuitable:
                 handler->PSendModuleSysMessage("mod-transmog", LANG_TRANSMOG_CMD_ADD_UNSUITABLE);
                 handler->SetSentErrorMessage(true);
                 break;
-            case ClaimResult::AlreadyOwned:
+            case ClaimAppearanceResult::AlreadyOwned:
                 handler->PSendModuleSysMessage("mod-transmog", LANG_TRANSMOG_CMD_CLAIM_ALREADY);
                 handler->SetSentErrorMessage(true);
                 break;
-            case ClaimResult::Claimed:
+            case ClaimAppearanceResult::Claimed:
                 break; // AddToDatabase already announced the new appearance.
+            case ClaimAppearanceResult::Refundable:
+            case ClaimAppearanceResult::Tradeable:
+                break; // Explicit claims consume these states and cannot return either result.
         }
         return true;
     }

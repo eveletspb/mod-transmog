@@ -7,6 +7,22 @@
 
 This is a module for [AzerothCore](http://www.azerothcore.org) that adds **Transmog**rification feature, it's based on [Rochet2 Transmog Script](http://rochet2.github.io/Transmogrification.html) 
 
+## About this fork
+
+This repository is a fork of the upstream [AzerothCore mod-transmog](https://github.com/azerothcore/mod-transmog). It keeps the upstream transmogrification behavior and adds automatic collection of eligible item appearances directly from the player's backpack and equipped bags, without requiring the player to equip each item.
+
+Fork-specific additions:
+
+- automatic inventory collection through `PLAYERHOOK_ON_STORE_NEW_ITEM` and a login backfill;
+- optional BOE binding before permanently unlocking an appearance;
+- a non-binding mode for servers that intentionally allow one tradeable BOE item to unlock an appearance for multiple accounts;
+- protection for refundable and temporarily BoP-tradeable items;
+- a shared validation and claim path for automatic collection and `.transmog claim`;
+- safer interoperability with auto-sell modules: the collection hook does not retain or dereference its incoming `Item*` and resolves current inventory items by slot instead.
+- an optional WoW 3.3.5a client addon with its own appearance browser and `DressUpModel` preview.
+
+The new behavior is controlled by `Transmogrification.AutoCollectInventoryAppearances` and `Transmogrification.AutoCollectBindItems`. Both options are enabled by default and are documented below and in `conf/transmog.conf.dist`.
+
 ## Important notes
 
 You have to use at least this AzerothCore commit:
@@ -37,10 +53,10 @@ You can do clone it via git under the azerothcore/modules directory:
 
 ```sh
 cd path/to/azerothcore/modules
-git clone https://github.com/azerothcore/mod-transmog.git
+git clone https://github.com/eveletspb/mod-transmog.git
 ```
 
-or you can manually [download the module](https://github.com/azerothcore/mod-transmog/archive/master.zip), unzip the Transmog folder and place it under the `azerothcore/modules` directory.
+or you can manually [download the module](https://github.com/eveletspb/mod-transmog/archive/master.zip), unzip the Transmog folder and place it under the `azerothcore/modules` directory.
 
 ### 2) Import the SQL to the right Database (auth, world or characters)
 
@@ -62,12 +78,66 @@ With a gm account goto the location you want to add the npc and use this command
 
 If you need to change the module configuration, go to your server configuration folder (e.g. **etc**), copy `transmog.conf.dist` to `transmog.conf` and edit it as you prefer.
 
+## Client addon
+
+The optional addon is located in `client/Transmog`. Copy that directory to the
+client so the resulting layout is:
+
+```text
+World of Warcraft/
+└── Interface/
+    └── AddOns/
+        └── Transmog/
+            ├── Transmog.toc
+            ├── Core.lua
+            └── ...
+```
+
+Enable `ACore Transmog` in the character-selection addon list. The addon sends a
+protocol handshake after login. When the player then interacts with the existing
+transmogrifier NPC, its window opens instead of the gossip item browser. Players
+without the addon continue to use the original gossip interface.
+
+The addon supports an outfit draft: players can preview appearances for several
+equipment slots, see the combined price, and apply the complete outfit in one
+validated server operation. Applied slots and unpublished draft changes use
+different highlights in the model panel.
+
+Players can also save the effective preview as a named outfit, load it back into
+the draft, rename it, or delete it. Saved outfits reuse the existing
+`custom_transmogrification_sets` table and the module's `EnableSets`/`MaxSets`
+configuration; no additional SQL migration is needed.
+
+Server configuration:
+
+```ini
+Transmogrification.Addon.Enabled = 1
+Transmogrification.Addon.PreferInterface = 1
+Transmogrification.Addon.SessionTtlSeconds = 60
+Transmogrification.Addon.PageSize = 60
+```
+
+The AzerothCore addon channel must also be enabled with `AddonChannel = 1` in
+`worldserver.conf`. No additional SQL is required.
+
+The preview uses the client API `DressUpModel:TryOn()`. Test it on the exact HD
+client build before deployment because some custom clients modify or break that
+API independently of the server.
+
+## Automatic appearance collection
+
+When the account-wide collection system is enabled, the module can automatically collect eligible appearances from the player's backpack and equipped bags without requiring the item to be equipped:
+
+```ini
+Transmogrification.AutoCollectInventoryAppearances = 1
+Transmogrification.AutoCollectBindItems = 1
+```
+
+With `AutoCollectBindItems = 1`, an eligible BOE item is bound before its appearance is permanently added to the account collection. Refundable items and items that are temporarily BoP-tradeable are skipped so automatic collection does not cancel vendor refunds or raid loot trading.
+
+Setting `AutoCollectBindItems = 0` keeps the physical item unchanged while permanently unlocking its appearance. Use this mode only if your server intentionally allows the same tradeable BOE item to unlock an appearance for multiple accounts. The explicit `.transmog claim` command always binds the claimed item regardless of this setting.
+
 
 ## License
 
 This module is released under the [GNU AGPL license](https://github.com/azerothcore/mod-transmog/blob/master/LICENSE).
-
-
-
-
-

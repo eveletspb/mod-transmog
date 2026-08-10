@@ -180,6 +180,21 @@ enum PlusFeatures
     PLUS_FEATURE_SKIP_LEVEL_REQ
 };
 
+enum class ClaimAppearanceMode
+{
+    Explicit,
+    Automatic
+};
+
+enum class ClaimAppearanceResult
+{
+    Claimed,
+    AlreadyOwned,
+    Unsuitable,
+    Refundable,
+    Tradeable
+};
+
 const uint32 TMOG_VENDOR_CREATURE_ID = 190010;
 
 class Transmogrification
@@ -273,6 +288,8 @@ public:
     bool IgnoreReqStats;
 
     bool UseCollectionSystem;
+    bool AutoCollectInventoryAppearances;
+    bool AutoCollectBindItems;
     bool UseVendorInterface;
     
     bool AllowHiddenTransmog;
@@ -302,12 +319,13 @@ public:
     uint32 GetFakeEntry(ObjectGuid itemGUID) const;
     void UpdateItem(Player* player, Item* item) const;
     void DeleteFakeEntry(Player* player, uint8 slot, Item* itemTransmogrified, CharacterDatabaseTransaction* trans = nullptr);
-    void SetFakeEntry(Player* player, uint32 newEntry, uint8 slot, Item* itemTransmogrified);
+    void SetFakeEntry(Player* player, uint32 newEntry, uint8 slot, Item* itemTransmogrified, CharacterDatabaseTransaction* trans = nullptr);
     bool AddCollectedAppearance(uint32 accountId, uint32 itemId);
     // Adds the item's appearance to the player's account collection and, if newly unlocked,
     // notifies the player (LANG_TRANSMOG_ADDED_APPEARANCE). Shared by the auto-collect player
     // script and the `.transmog claim` command.
     void AddToDatabase(Player* player, ItemTemplate const* itemTemplate);
+    ClaimAppearanceResult ClaimAppearance(Player* player, Item* item, ClaimAppearanceMode mode);
 
     TransmogStrings Transmogrify(Player* player, ObjectGuid itemGUID, uint8 slot, /*uint32 newEntry, */bool no_cost = false);
     TransmogStrings Transmogrify(Player* player, uint32 itemEntry, uint8 slot, /*uint32 newEntry, */bool no_cost = false);
@@ -339,6 +357,8 @@ public:
     bool GetAllowTradeable() const;
 
     bool GetUseCollectionSystem() const;
+    bool GetAutoCollectInventoryAppearances() const;
+    bool GetAutoCollectBindItems() const;
     bool GetUseVendorInterface() const;
     bool GetAllowHiddenTransmog() const;
     bool GetHiddenTransmogIsFree() const;
