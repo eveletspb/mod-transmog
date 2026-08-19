@@ -80,20 +80,20 @@ If you need to change the module configuration, go to your server configuration 
 
 ## Client addon
 
-The optional addon is located in `client/Transmog`. Copy that directory to the
-client so the resulting layout is:
+The optional client addon is maintained separately as `SbTransmog`. Install it
+so the resulting layout is:
 
 ```text
 World of Warcraft/
 └── Interface/
     └── AddOns/
-        └── Transmog/
-            ├── Transmog.toc
+        └── SbTransmog/
+            ├── SbTransmog.toc
             ├── Core.lua
             └── ...
 ```
 
-Enable `ACore Transmog` in the character-selection addon list. The addon sends a
+Enable `SbTransmog` in the character-selection addon list. The addon sends a
 protocol handshake after login. When the player then interacts with the existing
 transmogrifier NPC, its window opens instead of the gossip item browser. Players
 without the addon continue to use the original gossip interface.
