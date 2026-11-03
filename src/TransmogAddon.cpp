@@ -5,7 +5,6 @@
 #include "DatabaseEnv.h"
 #include "GameTime.h"
 #include "Item.h"
-#include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "Opcodes.h"
 #include "Player.h"
@@ -26,7 +25,7 @@
 namespace
 {
 constexpr std::string_view AddonPrefix = "AC_TRANSMOG";
-constexpr uint32 ProtocolVersion = 4;
+constexpr uint32 ProtocolVersion = 5;
 constexpr uint32 MinListIntervalMs = 150;
 constexpr uint32 MinOperationIntervalMs = 500;
 constexpr std::size_t ItemsPerChunk = 20;
@@ -35,7 +34,6 @@ struct ClientState
 {
     bool compatible = false;
     uint32 sessionId = 0;
-    ObjectGuid npcGuid;
     uint64 expiresAtMs = 0;
     uint64 lastListAtMs = 0;
     uint64 lastOperationAtMs = 0;
@@ -138,11 +136,6 @@ bool ValidateSession(Player* player, uint32 sessionId, ClientState*& state)
 
     uint64 now = NowMs();
     if (client->second.expiresAtMs < now)
-        return false;
-
-    Creature* creature = ObjectAccessor::GetCreatureOrPetOrVehicle(*player, client->second.npcGuid);
-    if (!creature || !sTransmogrification->IsTransmogVendor(creature->GetEntry()) ||
-        !creature->IsWithinDistInMap(player, INTERACTION_DISTANCE))
         return false;
 
     client->second.expiresAtMs = now + GetSessionTtlMs();
@@ -287,6 +280,27 @@ bool BeginSetOperation(Player* player, uint32 requestId, uint32 sessionId, Clien
     return true;
 }
 
+bool OpenSession(Player* player)
+{
+    if (!IsEnabled() || !sTransmogrification->IsEnabled() || !sTransmogrification->GetUseCollectionSystem())
+        return false;
+
+    auto client = Clients.find(player->GetGUID());
+    if (client == Clients.end() || !client->second.compatible)
+        return false;
+
+    ClientState& state = client->second;
+    if (++NextSessionId == 0)
+        ++NextSessionId;
+    state.sessionId = NextSessionId;
+    state.expiresAtMs = NowMs() + GetSessionTtlMs();
+    // Keep throttles across sessions; old requests are rejected by session ID.
+    state.completedOperations.clear();
+    Send(player, "OPEN\t" + std::to_string(state.sessionId));
+    SendSlotStates(player);
+    return true;
+}
+
 void HandleHello(Player* player, std::vector<std::string> const& parts)
 {
     uint32 version = 0;
@@ -363,6 +377,13 @@ void HandleList(Player* player, std::vector<std::string> const& parts)
         wstrToLower(search);
     }
 
+    uint8 quality = 255;
+    if (parts.size() > 6 && (!ParseUnsigned(parts[6], quality) || (quality != 255 && quality > ITEM_QUALITY_HEIRLOOM)))
+    {
+        SendError(player, requestId, "QUALITY");
+        return;
+    }
+
     struct Appearance
     {
         ItemTemplate const* item;
@@ -377,7 +398,7 @@ void HandleList(Player* player, std::vector<std::string> const& parts)
         for (uint32 itemEntry : collection->second)
         {
             ItemTemplate const* appearance = sObjectMgr->GetItemTemplate(itemEntry);
-            if (!appearance)
+            if (!appearance || (quality != 255 && appearance->Quality != quality))
                 continue;
             if (!sTransmogrification->CanTransmogrifyItemWithItem(player, target->GetTemplate(), appearance))
                 continue;
@@ -395,7 +416,9 @@ void HandleList(Player* player, std::vector<std::string> const& parts)
     {
         if (left.item->Quality != right.item->Quality)
             return left.item->Quality > right.item->Quality;
-        return left.name < right.name;
+        if (left.name != right.name)
+            return left.name < right.name;
+        return left.item->ItemId < right.item->ItemId;
     });
 
     uint32 pageSize = GetPageSize();
@@ -921,22 +944,7 @@ bool TryOpen(Player* player, Creature* creature)
         !sConfigMgr->GetOption<bool>("Transmogrification.Addon.PreferInterface", true))
         return false;
 
-    auto client = Clients.find(player->GetGUID());
-    if (client == Clients.end() || !client->second.compatible)
-        return false;
-
-    ClientState& state = client->second;
-    if (++NextSessionId == 0)
-        ++NextSessionId;
-    state.sessionId = NextSessionId;
-    state.npcGuid = creature->GetGUID();
-    state.expiresAtMs = NowMs() + GetSessionTtlMs();
-    state.lastListAtMs = 0;
-    state.lastOperationAtMs = 0;
-    state.completedOperations.clear();
-    Send(player, "OPEN\t" + std::to_string(state.sessionId));
-    SendSlotStates(player);
-    return true;
+    return OpenSession(player);
 }
 
 bool HandleMessage(Player* player, std::string const& message)
@@ -951,6 +959,11 @@ bool HandleMessage(Player* player, std::string const& message)
 
     if (parts[0] == "HELLO")
         HandleHello(player, parts);
+    else if (parts[0] == "OPEN")
+    {
+        if (!OpenSession(player))
+            SendError(player, 0, "UNAVAILABLE");
+    }
     else if (parts[0] == "LIST" && IsEnabled())
         HandleList(player, parts);
     else if (parts[0] == "APPLY" && IsEnabled())

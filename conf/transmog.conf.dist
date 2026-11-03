@@ -54,7 +54,7 @@
 #        Default:     1
 #
 #    Transmogrification.Addon.SessionTtlSeconds
-#        Description: Time during which addon operations remain authorized after interacting with the NPC.
+#        Description: Idle timeout for an addon session opened through /transmog or the NPC.
 #        Default:     60
 #
 #    Transmogrification.Addon.PageSize

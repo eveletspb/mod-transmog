@@ -94,9 +94,18 @@ World of Warcraft/
 ```
 
 Enable `SbTransmog` in the character-selection addon list. The addon sends a
-protocol handshake after login. When the player then interacts with the existing
-transmogrifier NPC, its window opens instead of the gossip item browser. Players
-without the addon continue to use the original gossip interface.
+protocol handshake after login. Players can open `/transmog` anywhere without an
+NPC. Interacting with the existing transmogrifier NPC also opens the addon when
+`PreferInterface` is enabled. Players without the addon continue to use the
+original gossip interface.
+
+Addon protocol version **5** must match on both sides. `OPEN` creates a session
+without a creature; session ownership, idle expiry, operation throttling,
+collection membership, compatibility, and payment checks still apply.
+`LIST` carries request ID, session ID, equipment slot, page, localized name search,
+and quality (0–7, or 255 for all), separated by tabs. The server applies both
+filters before pagination and sorts quality descending, then name and item ID.
+Name search is case insensitive and uses the player's server locale.
 
 The addon supports an outfit draft: players can preview appearances for several
 equipment slots, see the combined price, and apply the complete outfit in one
