@@ -99,7 +99,7 @@ NPC. Interacting with the existing transmogrifier NPC also opens the addon when
 `PreferInterface` is enabled. Players without the addon continue to use the
 original gossip interface.
 
-Addon protocol version **5** must match on both sides. `OPEN` creates a session
+Addon protocol version **6** must match on both sides. `OPEN` creates a session
 without a creature; session ownership, idle expiry, operation throttling,
 collection membership, compatibility, and payment checks still apply.
 `LIST` carries request ID, session ID, equipment slot, page, localized name search,
@@ -150,3 +150,14 @@ Setting `AutoCollectBindItems = 0` keeps the physical item unchanged while perma
 ## License
 
 This module is released under the [GNU AGPL license](https://github.com/azerothcore/mod-transmog/blob/master/LICENSE).
+
+## Audit regression checks
+
+Run `python3 tests/server_regression_test.py` from this module directory.
+These isolated checks exercise actual payment, ownership, claim and vendor function
+bodies with in-memory Core substitutes; they do not start worldserver or access a DB.
+Protocol v6 adds request-correlated opening, complete price/token snapshots and
+quote validation. Update SbTransmog together with this module. Inventory collection
+is coalesced until the next player update, after refund/trade flags are set; mail
+and trade arrivals use the same path. Applying/saving appearances persists payment
+or item binding in the same character-DB transaction as the appearance change.

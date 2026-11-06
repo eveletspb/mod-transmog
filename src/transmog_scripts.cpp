@@ -43,85 +43,44 @@ const uint32 CUSTOM_HIDE_ITEM_VENDOR_ID     = 57575;//Custom Hide Item item
 const uint32 CUSTOM_REMOVE_TMOG_VENDOR_ID   = 57576;//Custom Remove Transmog item
 
 
-uint32 GetTransmogPrice (ItemTemplate const* targetItem)
+std::vector<ItemTemplate const*> GetValidTransmogs(Player* player, Item* target, bool hasSearch, std::string const& search)
 {
-    uint32 price = sT->GetSpecialPrice(targetItem);
-    price *= sT->GetScaledCostModifier();
-    price += sT->GetCopperCost();
-    return price;
-}
-
-bool ValidForTransmog (Player* player, Item* target, Item* source, bool hasSearch, std::string searchTerm)
-{
-    if (!target || !source || !player) return false;
-    ItemTemplate const* targetTemplate = target->GetTemplate();
-    ItemTemplate const* sourceTemplate = source->GetTemplate();
-
-    if (!sT->CanTransmogrifyItemWithItem(player, targetTemplate, sourceTemplate))
-        return false;
-    if (sT->GetFakeEntry(target->GetGUID()) == source->GetEntry())
-        return false;
-    if (hasSearch && sourceTemplate->Name1.find(searchTerm) == std::string::npos)
-        return false;
-    return true;
-}
-
-bool CmpTmog (Item* i1, Item* i2)
-{
-    const ItemTemplate* i1t = i1->GetTemplate();
-    const ItemTemplate* i2t = i2->GetTemplate();
-    const int q1 = 7-i1t->Quality;
-    const int q2 = 7-i2t->Quality;
-    return std::tie(q1, i1t->Name1) < std::tie(q2, i2t->Name1);
-}
-
-std::vector<Item*> GetValidTransmogs (Player* player, Item* target, bool hasSearch, std::string searchTerm)
-{
-    std::vector<Item*> allowedItems;
-    if (!target) return allowedItems;
-
+    std::vector<ItemTemplate const*> items;
+    if (!target)
+        return items;
+    auto add = [&](ItemTemplate const* source)
+    {
+        if (source && sT->CanTransmogrifyItemWithItem(player, target->GetTemplate(), source) &&
+            sT->GetFakeEntry(target->GetGUID()) != source->ItemId &&
+            (!hasSearch || source->Name1.find(search) != std::string::npos))
+            items.push_back(source);
+    };
     if (sT->GetUseCollectionSystem())
     {
-        uint32 accountId = player->GetSession()->GetAccountId();
-        if (sT->collectionCache.find(accountId) == sT->collectionCache.end())
-            return allowedItems;
-
-        for (uint32 itemId : sT->collectionCache[accountId])
-        {
-            if (!sObjectMgr->GetItemTemplate(itemId))
-                continue;
-            Item* srcItem = Item::CreateItem(itemId, 1, 0);
-            if (ValidForTransmog(player, target, srcItem, hasSearch, searchTerm))
-                allowedItems.push_back(srcItem);
-        }
+        auto collection = sT->collectionCache.find(player->GetSession()->GetAccountId());
+        if (collection != sT->collectionCache.end())
+            for (uint32 entry : collection->second)
+                add(sObjectMgr->GetItemTemplate(entry));
     }
     else
     {
-        for (uint8 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
-        {
-            Item* srcItem = player->GetItemByPos(INVENTORY_SLOT_BAG_0, i);
-            if (ValidForTransmog(player, target, srcItem, hasSearch, searchTerm))
-                allowedItems.push_back(srcItem);
-        }
-        for (uint8 i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END; ++i)
-        {
-            Bag* bag = player->GetBagByPos(i);
-            if (!bag)
-                continue;
-            for (uint32 j = 0; j < bag->GetBagSize(); ++j)
-            {
-                Item* srcItem = player->GetItemByPos(i, j);
-                if (ValidForTransmog(player, target, srcItem, hasSearch, searchTerm))
-                    allowedItems.push_back(srcItem);
-            }
-        }
+        for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+            if (Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+                add(item->GetTemplate());
+        for (uint8 pos = INVENTORY_SLOT_BAG_START; pos < INVENTORY_SLOT_BAG_END; ++pos)
+            if (Bag* bag = player->GetBagByPos(pos))
+                for (uint32 slot = 0; slot < bag->GetBagSize(); ++slot)
+                    if (Item* item = player->GetItemByPos(pos, slot))
+                        add(item->GetTemplate());
     }
-
-    if (sConfigMgr->GetOption<bool>("Transmogrification.EnableSortByQualityAndName", true)) {
-        sort(allowedItems.begin(), allowedItems.end(), CmpTmog);
-    }
-
-    return allowedItems;
+    if (sConfigMgr->GetOption<bool>("Transmogrification.EnableSortByQualityAndName", true))
+        std::sort(items.begin(), items.end(), [](ItemTemplate const* left, ItemTemplate const* right)
+        {
+            if (left->Quality != right->Quality)
+                return left->Quality > right->Quality;
+            return std::tie(left->Name1, left->ItemId) < std::tie(right->Name1, right->ItemId);
+        });
+    return items;
 }
 
 void PerformTransmogrification (Player* player, uint32 itemEntry, uint32 cost)
@@ -360,8 +319,7 @@ public:
                     OnGossipHello(player, creature);
                     return true;
                 }
-                uint32 cost = 0;
-                bool canSave = false;
+                Transmogrification::slotMap entries;
                 for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
                 {
                     if (!sT->GetSlotName(slot, session))
@@ -371,18 +329,14 @@ public:
                         uint32 entry = sT->GetFakeEntry(newItem->GetGUID());
                         if (!entry)
                             continue;
-                        const ItemTemplate* temp = sObjectMgr->GetItemTemplate(entry);
-                        if (!temp)
+                        if (entry != HIDDEN_ITEM_ID && !sT->SuitableForTransmogrification(player, sObjectMgr->GetItemTemplate(entry)))
                             continue;
-                        if (!sT->SuitableForTransmogrification(player, temp)) // no need to check?
-                            continue;
-                        cost += sT->GetSpecialPrice(temp);
-                        canSave = true;
+                        entries[slot] = entry;
                         AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG, sT->GetItemIcon(entry, 30, 30, -18, 0) + sT->GetItemLink(entry, session), EQUIPMENT_SLOT_END + 8, 0);
                     }
                 }
-                if (canSave)
-                    AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG, "|TInterface/GuildBankFrame/UI-GuildBankFrame-NewTab:30:30:-18:0|t" + Tstr(session, LANG_TRANSMOG_SAVESET), 0, 0, Tstr(session, LANG_TRANSMOG_INSERTSETNAME), cost*sT->GetSetCostModifier() + sT->GetSetCopperCost(), true);
+                if (!entries.empty())
+                    AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG, "|TInterface/GuildBankFrame/UI-GuildBankFrame-NewTab:30:30:-18:0|t" + Tstr(session, LANG_TRANSMOG_SAVESET), 0, 0, Tstr(session, LANG_TRANSMOG_INSERTSETNAME), sT->GetSetPrice(entries), true);
                 AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG, "|TInterface/PaperDollInfoFrame/UI-GearManager-Undo:30:30:-18:0|t" + Tstr(session, LANG_TRANSMOG_UPDATEMENU), sender, action);
                 AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG, "|TInterface/ICONS/Ability_Spy:30:30:-18:0|t" + Tstr(session, LANG_TRANSMOG_BACK), EQUIPMENT_SLOT_END + 4, 0);
                 SendGossipMenuFor(player, DEFAULT_GOSSIP_MESSAGE, creature->GetGUID());
@@ -444,7 +398,6 @@ public:
                 if (sT->presetByName[player->GetGUID()].find(presetID) != sT->presetByName[player->GetGUID()].end())
                     continue; // Just remember never to use presetByName[pGUID][presetID] when finding etc!
 
-                int32 cost = 0;
                 std::map<uint8, uint32> items;
                 for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
                 {
@@ -462,15 +415,13 @@ public:
                                 continue;
                             if (!sT->SuitableForTransmogrification(player, temp))
                                 continue;
-                            cost += sT->GetSpecialPrice(temp);
                         }
                         items[slot] = entry;
                     }
                 }
                 if (items.empty())
                     break; // no transmogrified items were found to be saved
-                cost *= sT->GetSetCostModifier();
-                cost += sT->GetSetCopperCost();
+                uint32 cost = sT->GetSetPrice(items);
                 if (!player->HasEnoughMoney(cost))
                 {
                     ChatHandler(player->GetSession()).SendNotification(Tstr(player->GetSession(), LANG_TRANSMOG_NOT_ENOUGH_MONEY));
@@ -484,9 +435,14 @@ public:
                     sT->presetById[player->GetGUID()][presetID][it->first] = it->second;
                 }
                 sT->presetByName[player->GetGUID()][presetID] = name; // Make sure code doesnt mess up SQL!
-                CharacterDatabase.Execute("REPLACE INTO `custom_transmogrification_sets` (`Owner`, `PresetID`, `SetName`, `SetData`) VALUES ({}, {}, \"{}\", \"{}\")", player->GetGUID().GetCounter(), uint32(presetID), name, ss.str());
+                auto transaction = CharacterDatabase.BeginTransaction();
+                CharacterDatabase.EscapeString(name);
+                transaction->Append("REPLACE INTO `custom_transmogrification_sets` (`Owner`, `PresetID`, `SetName`, `SetData`) VALUES ({}, {}, '{}', '{}')",
+                    player->GetGUID().GetCounter(), uint32(presetID), name, ss.str());
                 if (cost)
-                    player->ModifyMoney(-cost);
+                    player->ModifyMoney(-static_cast<int32>(cost));
+                player->SaveInventoryAndGoldToDB(transaction);
+                CharacterDatabase.CommitTransaction(transaction);
                 break;
             }
         }
@@ -496,102 +452,45 @@ public:
     }
 #endif
 
-    void ShowTransmogItemsInGossipMenu(Player* player, Creature* creature, uint8 slot, uint16 gossipPageNumber) // Only checks bags while can use an item from anywhere in inventory
+    void ShowTransmogItemsInGossipMenu(Player* player, Creature* creature, uint8 slot, uint16 gossipPageNumber)
     {
         WorldSession* session = player->GetSession();
-        Item* oldItem = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
-        bool hasSearchString;
-
-        uint16 pageNumber = 0;
-        uint32 startValue = 0;
-        uint32 endValue = MAX_OPTIONS - 4;
-        bool lastPage = true;
-        if (gossipPageNumber > EQUIPMENT_SLOT_END + 10)
+        Item* target = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+        if (target)
         {
-            pageNumber = gossipPageNumber - EQUIPMENT_SLOT_END - 10;
-            startValue = (pageNumber * (MAX_OPTIONS - 2));
-            endValue = (pageNumber + 1) * (MAX_OPTIONS - 2) - 1;
-        }
-
-        if (oldItem)
-        {
-            uint32 price = GetTransmogPrice(oldItem->GetTemplate());
-            std::ostringstream ss;
-            ss << std::endl;
-            if (sT->GetRequireToken())
-                ss << std::endl << std::endl << sT->GetTokenAmount() << " x " << sT->GetItemLink(sT->GetTokenEntry(), session);
-            std::string lineEnd = ss.str();
-
-            std::unordered_map<uint32, std::string>::iterator searchStringIterator = sT->searchStringByPlayer.find(player->GetGUID().GetCounter());
-            hasSearchString = !(searchStringIterator == sT->searchStringByPlayer.end());
-            std::string searchDisplayValue(hasSearchString ? searchStringIterator->second : Tstr(session, LANG_TRANSMOG_SEARCH));
-            std::vector<Item*> allowedItems = GetValidTransmogs(player, oldItem, hasSearchString, searchDisplayValue);
-
-            if (allowedItems.size() > 0)
+            constexpr uint32 pageSize = MAX_OPTIONS - 6;
+            uint32 page = gossipPageNumber > EQUIPMENT_SLOT_END + 10 ? gossipPageNumber - EQUIPMENT_SLOT_END - 10 : 0;
+            auto search = sT->searchStringByPlayer.find(player->GetGUID().GetCounter());
+            bool hasSearch = search != sT->searchStringByPlayer.end();
+            std::string searchText = hasSearch ? search->second : Tstr(session, LANG_TRANSMOG_SEARCH);
+            auto items = GetValidTransmogs(player, target, hasSearch, searchText);
+            uint32 pages = std::max(1U, static_cast<uint32>((items.size() + pageSize - 1) / pageSize));
+            page = std::min(page, pages - 1);
+            if (!page)
             {
-                lastPage = false;
-                // Offset values to add Search gossip item
-                if (pageNumber == 0)
-                {
-                    if (hasSearchString)
-                    {
-                        AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG, sT->GetItemIcon(30620, 30, 30, -18, 0) + Tstr(session, LANG_TRANSMOG_SEARCHING_FOR) + searchDisplayValue, slot + 1, 0, Tstr(session, LANG_TRANSMOG_SEARCH_FOR_ITEM), 0, true);
-                    }
-                    else
-                    {
-                        AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG, sT->GetItemIcon(30620, 30, 30, -18, 0) + Tstr(session, LANG_TRANSMOG_SEARCH), slot + 1, 0, Tstr(session, LANG_TRANSMOG_SEARCH_FOR_ITEM), 0, true);
-                    }
-                }
-                else
-                {
-                    startValue--;
-                }
+                AddGossipItemFor(player, GOSSIP_ICON_CHAT, searchText, slot + 1, 0, Tstr(session, LANG_TRANSMOG_SEARCH_FOR_ITEM), 0, true);
                 if (sT->GetAllowHiddenTransmog())
-                {
-                    // Offset the start and end values to make space for invisible item entry
-                    endValue--;
-                    if (pageNumber != 0)
-                    {
-                        startValue--;
-                    }
-                    else
-                    {
-                        // Add invisible item entry
-                        AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG, "|TInterface/ICONS/inv_misc_enggizmos_27:30:30:-18:0|t" + Tstr(session, LANG_TRANSMOG_HIDESLOT), slot, UINT_MAX, Tstr(session, LANG_TRANSMOG_CONFIRM_HIDE_ITEM) + lineEnd, 0, false);
-                    }
-                }
-                for (uint32 i = startValue; i <= endValue; i++)
-                {
-                    if (allowedItems.empty() || i > allowedItems.size() - 1)
-                    {
-                        lastPage = true;
-                        break;
-                    }
-                    Item* newItem = allowedItems.at(i);
-                    AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG, sT->GetItemIcon(newItem->GetEntry(), 30, 30, -18, 0) + sT->GetItemLink(newItem, session), slot, newItem->GetEntry(), Tstr(session, LANG_TRANSMOG_CONFIRM_USEITEM) + sT->GetItemIcon(newItem->GetEntry(), 40, 40, -15, -10) + sT->GetItemLink(newItem, session) + lineEnd, price, false);
-                }
+                    AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG, Tstr(session, LANG_TRANSMOG_HIDESLOT), slot, UINT_MAX,
+                        Tstr(session, LANG_TRANSMOG_CONFIRM_HIDE_ITEM), 0, false);
             }
-            if (gossipPageNumber == EQUIPMENT_SLOT_END + 11)
+            uint32 price = sT->GetPrice(target->GetTemplate());
+            for (std::size_t index = page * pageSize; index < std::min(items.size(), std::size_t((page + 1) * pageSize)); ++index)
             {
-                AddGossipItemFor(player, GOSSIP_ICON_CHAT, Tstr(session, LANG_TRANSMOG_PREVIOUS_PAGE), EQUIPMENT_SLOT_END, slot);
-                if (!lastPage)
-                    AddGossipItemFor(player, GOSSIP_ICON_CHAT, Tstr(session, LANG_TRANSMOG_NEXT_PAGE), gossipPageNumber + 1, slot);
+                uint32 entry = items[index]->ItemId;
+                std::string link = sT->GetItemLink(entry, session);
+                AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG, sT->GetItemIcon(entry, 30, 30, -18, 0) + link,
+                    slot, entry, Tstr(session, LANG_TRANSMOG_CONFIRM_USEITEM) + link, price, false);
             }
-            else if (gossipPageNumber > EQUIPMENT_SLOT_END + 11)
-            {
-                AddGossipItemFor(player, GOSSIP_ICON_CHAT, Tstr(session, LANG_TRANSMOG_PREVIOUS_PAGE), gossipPageNumber - 1, slot);
-                if (!lastPage)
-                    AddGossipItemFor(player, GOSSIP_ICON_CHAT, Tstr(session, LANG_TRANSMOG_NEXT_PAGE), gossipPageNumber + 1, slot);
-            }
-            else if (!lastPage)
-            {
-                AddGossipItemFor(player, GOSSIP_ICON_CHAT, Tstr(session, LANG_TRANSMOG_NEXT_PAGE), EQUIPMENT_SLOT_END + 11, slot);
-            }
-
-            AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG, "|TInterface/ICONS/INV_Enchant_Disenchant:30:30:-18:0|t" + Tstr(session, LANG_TRANSMOG_REMOVETRANSMOG), EQUIPMENT_SLOT_END + 3, slot, Tstr(session, LANG_TRANSMOG_REMOVETRANSMOG_SLOT), 0, false);
-            AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG, "|TInterface/PaperDollInfoFrame/UI-GearManager-Undo:30:30:-18:0|t" + Tstr(session, LANG_TRANSMOG_UPDATEMENU), EQUIPMENT_SLOT_END, slot);
+            if (page)
+                AddGossipItemFor(player, GOSSIP_ICON_CHAT, Tstr(session, LANG_TRANSMOG_PREVIOUS_PAGE),
+                    page == 1 ? EQUIPMENT_SLOT_END : EQUIPMENT_SLOT_END + 9 + page, slot);
+            if (page + 1 < pages)
+                AddGossipItemFor(player, GOSSIP_ICON_CHAT, Tstr(session, LANG_TRANSMOG_NEXT_PAGE), EQUIPMENT_SLOT_END + 11 + page, slot);
+            AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG, Tstr(session, LANG_TRANSMOG_REMOVETRANSMOG),
+                EQUIPMENT_SLOT_END + 3, slot, Tstr(session, LANG_TRANSMOG_REMOVETRANSMOG_SLOT), 0, false);
+            AddGossipItemFor(player, GOSSIP_ICON_CHAT, Tstr(session, LANG_TRANSMOG_UPDATEMENU), EQUIPMENT_SLOT_END, slot);
         }
-        AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG, "|TInterface/ICONS/Ability_Spy:30:30:-18:0|t" + Tstr(session, LANG_TRANSMOG_BACK), EQUIPMENT_SLOT_END + 1, 0);
+        AddGossipItemFor(player, GOSSIP_ICON_CHAT, Tstr(session, LANG_TRANSMOG_BACK), EQUIPMENT_SLOT_END + 1, 0);
         SendGossipMenuFor(player, DEFAULT_GOSSIP_MESSAGE, creature->GetGUID());
     }
 
@@ -661,13 +560,13 @@ public:
         }
         ItemTemplate const* targetTemplate = targetItem->GetTemplate();
 
-        std::vector<Item*> itemList = GetValidTransmogs(player, targetItem, false, "");
+        std::vector<ItemTemplate const*> itemList = GetValidTransmogs(player, targetItem, false, "");
         std::vector<ItemTemplate const*> spoofedItems = GetSpoofedVendorItems(targetItem);
 
         uint32 itemCount = itemList.size();
         uint32 spoofCount = spoofedItems.size();
         uint32 totalItems = itemCount + spoofCount;
-        uint32 price = GetTransmogPrice(targetItem->GetTemplate());
+        uint32 price = sT->GetPrice(targetItem->GetTemplate());
 
         WorldPacket data(SMSG_LIST_INVENTORY, 8 + 1 + totalItems * 8 * 4);
         data << uint64(creature->GetGUID().GetRawValue());
@@ -685,7 +584,7 @@ public:
         }
         for (uint32 i = 0; i < itemCount && count < MAX_VENDOR_ITEMS; ++i)
         {
-            ItemTemplate const* _proto = itemList[i]->GetTemplate();
+            ItemTemplate const* _proto = itemList[i];
             if (_proto) EncodeItemToPacket(data, _proto, count, price);
         }
 
@@ -736,81 +635,38 @@ private:
         sT->AddToDatabase(player, itemTemplate);
     }
 
-    void CollectInventoryAppearances(Player* player)
+    void CollectInventoryAppearances(Player* player, bool includeBank = false)
     {
-        if (!player || !sT->GetUseCollectionSystem() || !sT->GetAutoCollectInventoryAppearances())
+        if (!player || !sT->GetUseCollectionSystem() || (!includeBank && !sT->GetAutoCollectInventoryAppearances()))
             return;
-
-        auto collectSlot = [player](uint8 bag, uint8 slot)
+        auto transaction = CharacterDatabase.BeginTransaction();
+        bool changed = false;
+        auto collectSlot = [&](uint8 bag, uint8 slot)
         {
-            // Resolve the current item from the player's inventory for every operation. Never retain
-            // an Item pointer between hooks: another module may sell or destroy the item afterwards.
             if (Item* item = player->GetItemByPos(bag, slot))
-                sT->ClaimAppearance(player, item, ClaimAppearanceMode::Automatic);
+                if (sT->ClaimAppearance(player, item, ClaimAppearanceMode::Automatic, &transaction) == ClaimAppearanceResult::Claimed)
+                    changed = true;
         };
-
-        for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
-            collectSlot(INVENTORY_SLOT_BAG_0, slot);
-
-        for (uint8 bagPos = INVENTORY_SLOT_BAG_START; bagPos < INVENTORY_SLOT_BAG_END; ++bagPos)
+        for (uint8 slot = EQUIPMENT_SLOT_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+            if (slot < INVENTORY_SLOT_BAG_START || slot >= INVENTORY_SLOT_ITEM_START)
+                collectSlot(INVENTORY_SLOT_BAG_0, slot);
+        for (uint8 pos = INVENTORY_SLOT_BAG_START; pos < INVENTORY_SLOT_BAG_END; ++pos)
+            if (Bag* bag = player->GetBagByPos(pos))
+                for (uint32 slot = 0; slot < bag->GetBagSize(); ++slot)
+                    collectSlot(pos, slot);
+        if (includeBank)
         {
-            Bag* bag = player->GetBagByPos(bagPos);
-            if (!bag)
-                continue;
-
-            uint32 bagSize = bag->GetBagSize();
-            for (uint32 slot = 0; slot < bagSize; ++slot)
-                collectSlot(bagPos, slot);
+            for (uint8 slot = BANK_SLOT_ITEM_START; slot < BANK_SLOT_ITEM_END; ++slot)
+                collectSlot(INVENTORY_SLOT_BAG_0, slot);
+            for (uint8 pos = BANK_SLOT_BAG_START; pos < BANK_SLOT_BAG_END; ++pos)
+                if (Bag* bag = player->GetBagByPos(pos))
+                    for (uint32 slot = 0; slot < bag->GetBagSize(); ++slot)
+                        collectSlot(pos, slot);
         }
-    }
-
-    void CheckRetroActiveInventoryAppearances(Player* player)
-    {
-        if (!sT->GetUseCollectionSystem())
-            return;
-
-        for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+        if (changed)
         {
-            if (Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
-                AddToDatabase(player, item);
-        }
-
-        for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
-        {
-            if (Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
-                AddToDatabase(player, item);
-        }
-
-        for (uint8 bagPos = INVENTORY_SLOT_BAG_START; bagPos < INVENTORY_SLOT_BAG_END; ++bagPos)
-        {
-            Bag* bag = player->GetBagByPos(bagPos);
-            if (!bag)
-                continue;
-
-            for (uint32 slot = 0; slot < bag->GetBagSize(); ++slot)
-            {
-                if (Item* item = player->GetItemByPos(bagPos, slot))
-                    AddToDatabase(player, item);
-            }
-        }
-
-        for (uint8 slot = BANK_SLOT_ITEM_START; slot < BANK_SLOT_ITEM_END; ++slot)
-        {
-            if (Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
-                AddToDatabase(player, item);
-        }
-
-        for (uint8 bagPos = BANK_SLOT_BAG_START; bagPos < BANK_SLOT_BAG_END; ++bagPos)
-        {
-            Bag* bag = player->GetBagByPos(bagPos);
-            if (!bag)
-                continue;
-
-            for (uint32 slot = 0; slot < bag->GetBagSize(); ++slot)
-            {
-                if (Item* item = player->GetItemByPos(bagPos, slot))
-                    AddToDatabase(player, item);
-            }
+            player->SaveInventoryAndGoldToDB(transaction);
+            CharacterDatabase.CommitTransaction(transaction);
         }
     }
 
@@ -827,7 +683,7 @@ private:
         }
 
         // One-time backfill for already-owned items
-        CheckRetroActiveInventoryAppearances(player);
+        CollectInventoryAppearances(player, true);
         player->UpdatePlayerSetting("mod-transmog", SETTING_RETROACTIVE_CHECK, 1);
     }
 public:
@@ -835,6 +691,8 @@ public:
         PLAYERHOOK_ON_EQUIP,
         PLAYERHOOK_ON_LOOT_ITEM,
         PLAYERHOOK_ON_STORE_NEW_ITEM,
+        PLAYERHOOK_ON_UPDATE,
+        PLAYERHOOK_ON_AFTER_MOVE_ITEM_TO_INVENTORY,
         PLAYERHOOK_ON_CREATE_ITEM,
         PLAYERHOOK_ON_AFTER_STORE_OR_EQUIP_NEW_ITEM,
         PLAYERHOOK_ON_PLAYER_COMPLETE_QUEST,
@@ -849,7 +707,10 @@ public:
     {
         if (!sT->GetUseCollectionSystem())
             return;
-        AddToDatabase(player, it);
+        if (sT->GetAutoCollectInventoryAppearances())
+            player->CustomData.GetDefault<DataMap::Base>("mod-transmog-collect");
+        else
+            AddToDatabase(player, it);
     }
 
     void OnPlayerLootItem(Player* player, Item* item, uint32 /*count*/, ObjectGuid /*lootguid*/) override
@@ -866,9 +727,21 @@ public:
 
     void OnPlayerStoreNewItem(Player* player, Item* /*item*/, uint32 /*count*/) override
     {
-        // The hook Item pointer is intentionally ignored. A synchronous inventory scan only uses
-        // objects that are still owned by the player, which is safe with deferred auto-sell modules.
-        CollectInventoryAppearances(player);
+        if (sT->GetUseCollectionSystem() && sT->GetAutoCollectInventoryAppearances())
+            player->CustomData.GetDefault<DataMap::Base>("mod-transmog-collect");
+    }
+
+    void OnPlayerAfterMoveItemToInventory(Player* player, Item* /*item*/, bool /*update*/) override
+    {
+        if (sT->GetUseCollectionSystem() && sT->GetAutoCollectInventoryAppearances())
+            player->CustomData.GetDefault<DataMap::Base>("mod-transmog-collect");
+    }
+
+    void OnPlayerUpdate(Player* player, uint32 /*diff*/) override
+    {
+        // Run once per player tick, after vendor refund/trade flags and all item hooks are complete.
+        if (player->CustomData.Erase("mod-transmog-collect"))
+            CollectInventoryAppearances(player);
     }
 
     void OnPlayerCreateItem(Player* player, Item* item, uint32 /*count*/) override
@@ -994,19 +867,26 @@ public:
         if (!sT->IsTransmogVendor(vendor->GetEntry()))
             return;
 
-        uint8 slot = sT->selectionCache[player->GetGUID()];
+        uint32 requestedEntry = itemEntry;
+        itemEntry = 0;
+        auto selected = sT->selectionCache.find(player->GetGUID());
+        if (!sT->IsEnabled() || selected == sT->selectionCache.end() ||
+            !player->GetNPCIfCanInteractWith(vendorguid, UNIT_NPC_FLAG_GOSSIP) ||
+            !(sT->GetUseVendorInterface() || player->GetPlayerSetting("mod-transmog", SETTING_VENDOR_INTERFACE).IsEnabled()))
+            return;
+        uint8 slot = selected->second;
 
-        if (itemEntry == CUSTOM_HIDE_ITEM_VENDOR_ID || itemEntry == FALLBACK_HIDE_ITEM_VENDOR_ID)
+        if (requestedEntry == CUSTOM_HIDE_ITEM_VENDOR_ID || requestedEntry == FALLBACK_HIDE_ITEM_VENDOR_ID)
         {
             PerformTransmogrification(player, UINT_MAX, 0);
         }
-        else if (itemEntry == CUSTOM_REMOVE_TMOG_VENDOR_ID || itemEntry == FALLBACK_REMOVE_TMOG_VENDOR_ID)
+        else if (requestedEntry == CUSTOM_REMOVE_TMOG_VENDOR_ID || requestedEntry == FALLBACK_REMOVE_TMOG_VENDOR_ID)
         {
             RemoveTransmogrification(player);
         }
         else
         {
-            PerformTransmogrification(player, itemEntry, 0);
+            PerformTransmogrification(player, requestedEntry, 0);
         }
         npc_transmogrifier::ShowTransmogItemsInFakeVendor(player, vendor, slot); //Refresh menu
         itemEntry = 0; //Prevents the handler from proceeding to core vendor handling

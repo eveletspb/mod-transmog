@@ -3,6 +3,8 @@
 #include "SpellMgr.h"
 #include "Tokenize.h"
 #include "Transmogrification.h"
+#include "TransmogPrice.h"
+#include "TransmogAddon.h"
 #include "WorldSession.h"
 #include "WorldSessionMgr.h"
 
@@ -15,29 +17,8 @@ Transmogrification* Transmogrification::instance()
 #ifdef PRESETS
 void Transmogrification::PresetTransmog(Player* player, Item* itemTransmogrified, uint32 fakeEntry, uint8 slot)
 {
-    LOG_DEBUG("module", "Transmogrification::PresetTransmog");
-
-    if (!EnableSets)
-        return;
-    if (!player || !itemTransmogrified)
-        return;
-    if (slot >= EQUIPMENT_SLOT_END)
-        return;
-    if (fakeEntry != HIDDEN_ITEM_ID && (!CanTransmogrifyItemWithItem(player, itemTransmogrified->GetTemplate(), sObjectMgr->GetItemTemplate(fakeEntry))))
-        return;
-
-    // [AZTH] Custom
-    if (GetFakeEntry(itemTransmogrified->GetGUID()))
-        DeleteFakeEntry(player, slot, itemTransmogrified);
-
-    SetFakeEntry(player, fakeEntry, slot, itemTransmogrified); // newEntry
-
-
-    itemTransmogrified->UpdatePlayedTime(player);
-
-    itemTransmogrified->SetOwnerGUID(player->GetGUID());
-    itemTransmogrified->SetNotRefundable(player);
-    itemTransmogrified->ClearSoulboundTradeable(player);
+    if (EnableSets && player && itemTransmogrified)
+        Transmogrify(player, fakeEntry == HIDDEN_ITEM_ID ? UINT_MAX : fakeEntry, slot, true);
 }
 
 void Transmogrification::LoadPlayerSets(ObjectGuid pGUID)
@@ -124,7 +105,7 @@ const char* Transmogrification::GetSlotName(uint8 slot, WorldSession* session) c
 
     LocaleConstant locale = session->GetSessionDbLocaleIndex();
 
-    std::unordered_map<uint8, const char*> defaultNames = {
+    static std::unordered_map<uint8, char const*> const defaultNames = {
         { EQUIPMENT_SLOT_HEAD, "Head" }, // session->GetAcoreString(LANG_SLOT_NAME_HEAD);
         { EQUIPMENT_SLOT_SHOULDERS, "Shoulders" }, // session->GetAcoreString(LANG_SLOT_NAME_SHOULDERS);
         { EQUIPMENT_SLOT_BODY, "Shirt" }, // session->GetAcoreString(LANG_SLOT_NAME_BODY);
@@ -141,7 +122,7 @@ const char* Transmogrification::GetSlotName(uint8 slot, WorldSession* session) c
         { EQUIPMENT_SLOT_TABARD, "Tabard" }, // session->GetAcoreString(LANG_SLOT_NAME_TABARD);
     };
 
-    std::unordered_map<uint8, std::unordered_map<LocaleConstant, const char*>> slotNames = {
+    static std::unordered_map<uint8, std::unordered_map<LocaleConstant, char const*>> const slotNames = {
         { EQUIPMENT_SLOT_HEAD, {
             { LOCALE_koKR, "머리" },
             { LOCALE_frFR, "Tête" },
@@ -480,7 +461,7 @@ bool Transmogrification::AddCollectedAppearance(uint32 accountId, uint32 itemId)
     return inserted;
 }
 
-void Transmogrification::AddToDatabase(Player* player, ItemTemplate const* itemTemplate)
+void Transmogrification::AddToDatabase(Player* player, ItemTemplate const* itemTemplate, CharacterDatabaseTransaction* trans)
 {
     if (!player || !itemTemplate)
         return;
@@ -506,11 +487,15 @@ void Transmogrification::AddToDatabase(Player* player, ItemTemplate const* itemT
         if (showChatMessage)
             ChatHandler(session).PSendSysMessage(R"(|c{}|Hitem:{}:0:0:0:0:0:0:0:0|h[{}]|h|r {})", itemQuality, itemId, itemName, *session->GetModuleString("mod-transmog", LANG_TRANSMOG_ADDED_APPEARANCE));
 
-        CharacterDatabase.Execute("INSERT INTO custom_unlocked_appearances (account_id, item_template_id) VALUES ({}, {})", accountId, itemId);
+        if (trans)
+            (*trans)->Append("INSERT IGNORE INTO custom_unlocked_appearances (account_id, item_template_id) VALUES ({}, {})", accountId, itemId);
+        else
+            CharacterDatabase.Execute("INSERT IGNORE INTO custom_unlocked_appearances (account_id, item_template_id) VALUES ({}, {})",
+                accountId, itemId);
     }
 }
 
-ClaimAppearanceResult Transmogrification::ClaimAppearance(Player* player, Item* item, ClaimAppearanceMode mode)
+ClaimAppearanceResult Transmogrification::ClaimAppearance(Player* player, Item* item, ClaimAppearanceMode mode, CharacterDatabaseTransaction* trans)
 {
     if (!player || !item || !player->GetSession())
         return ClaimAppearanceResult::Unsuitable;
@@ -524,159 +509,148 @@ ClaimAppearanceResult Transmogrification::ClaimAppearance(Player* player, Item* 
     if (accountCollection != collectionCache.end() && accountCollection->second.contains(itemTemplate->ItemId))
         return ClaimAppearanceResult::AlreadyOwned;
 
-    if (!SuitableForTransmogrification(player, itemTemplate))
-        return ClaimAppearanceResult::Unsuitable;
-
     bool isAutomatic = mode == ClaimAppearanceMode::Automatic;
-    if (isAutomatic && item->HasFlag(ITEM_FIELD_FLAGS, ITEM_FIELD_FLAG_REFUNDABLE))
+    if ((itemTemplate->Class != ITEM_CLASS_ARMOR && itemTemplate->Class != ITEM_CLASS_WEAPON) ||
+        ((!isAutomatic || !GetTrackUnusableItems()) && !SuitableForTransmogrification(player, itemTemplate)))
+        return ClaimAppearanceResult::Unsuitable;
+    if (isAutomatic && item->IsRefundable())
         return ClaimAppearanceResult::Refundable;
-    if (isAutomatic && item->HasFlag(ITEM_FIELD_FLAGS, ITEM_FIELD_FLAG_BOP_TRADEABLE))
+    if (isAutomatic && item->IsBOPTradable())
         return ClaimAppearanceResult::Tradeable;
 
+    auto transaction = trans ? *trans : CharacterDatabase.BeginTransaction();
     bool shouldBind = mode == ClaimAppearanceMode::Explicit || GetAutoCollectBindItems();
     if (shouldBind)
     {
         item->SetOwnerGUID(player->GetGUID());
-        item->SetNotRefundable(player);
+        item->SetNotRefundable(player, true, &transaction);
         if (!GetAllowTradeable())
             item->ClearSoulboundTradeable(player);
         item->SetBinding(true);
         item->SetState(ITEM_CHANGED, player);
     }
 
-    AddToDatabase(player, itemTemplate);
+    AddToDatabase(player, itemTemplate, &transaction);
+    if (!trans)
+    {
+        player->SaveInventoryAndGoldToDB(transaction);
+        CharacterDatabase.CommitTransaction(transaction);
+    }
     return ClaimAppearanceResult::Claimed;
 }
 
-TransmogStrings Transmogrification::Transmogrify(Player* player, uint32 itemEntry, uint8 slot, /*uint32 newEntry, */bool no_cost) {
-    if (itemEntry == UINT_MAX) // Hidden transmog
-    {
-        return Transmogrify(player, nullptr, slot, no_cost, true);
-    }
-
-    if (!sObjectMgr->GetItemTemplate(itemEntry))
-    {
-        LOG_ERROR("module", "Transmogrification::Transmogrify - Player ({}) tried to transmogrify with an invalid item entry ({}).", player->GetGUID().ToString(), itemEntry);
-        return LANG_TRANSMOG_MISSING_SRC_ITEM;
-    }
-
-    Item* itemTransmogrifier = Item::CreateItem(itemEntry, 1, 0);
-    return Transmogrify(player, itemTransmogrifier, slot, no_cost, false);
-}
-
-TransmogStrings Transmogrification::Transmogrify(Player* player, ObjectGuid itemGUID, uint8 slot, /*uint32 newEntry, */bool no_cost) {
-    Item* itemTransmogrifier = NULL;
-    // guid of the transmogrifier item, if it's not 0
-    if (itemGUID)
-    {
-        itemTransmogrifier = player->GetItemByGuid(itemGUID);
-        if (!itemTransmogrifier)
-        {
-            //TC_LOG_DEBUG(LOG_FILTER_NETWORKIO, "WORLD: HandleTransmogrifyItems - Player (GUID: {}, name: {}) tried to transmogrify with an invalid item (lowguid: {}).", player->GetGUIDLow(), player->GetName(), GUID_LOPART(itemGUID));
-            return LANG_TRANSMOG_MISSING_SRC_ITEM;
-        }
-    }
-    return Transmogrify(player, itemTransmogrifier, slot, no_cost, false);
-}
-
-TransmogStrings Transmogrification::Transmogrify(Player* player, Item* itemTransmogrifier, uint8 slot, /*uint32 newEntry, */bool no_cost, bool hidden_transmog)
+Item* Transmogrification::FindAppearanceSource(Player* player, uint32 entry) const
 {
-    int32 cost = 0;
-    // slot of the transmogrified item
-    if (slot >= EQUIPMENT_SLOT_END)
-    {
-        // TC_LOG_DEBUG(LOG_FILTER_NETWORKIO, "WORLD: HandleTransmogrifyItems - Player (GUID: {}, name: {}) tried to transmogrify an item (lowguid: {}) with a wrong slot ({}) when transmogrifying items.", player->GetGUIDLow(), player->GetName(), GUID_LOPART(itemGUID), slot);
+    for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+        if (Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+            if (item->GetEntry() == entry)
+                return item;
+    for (uint8 pos = INVENTORY_SLOT_BAG_START; pos < INVENTORY_SLOT_BAG_END; ++pos)
+        if (Bag* bag = player->GetBagByPos(pos))
+            for (uint32 slot = 0; slot < bag->GetBagSize(); ++slot)
+                if (Item* item = player->GetItemByPos(pos, slot))
+                    if (item->GetEntry() == entry)
+                        return item;
+    return nullptr;
+}
+
+bool Transmogrification::HasAppearance(Player* player, uint32 entry) const
+{
+    if (entry == HIDDEN_ITEM_ID)
+        return GetAllowHiddenTransmog();
+    if (!GetUseCollectionSystem())
+        return FindAppearanceSource(player, entry) != nullptr;
+    auto collection = collectionCache.find(player->GetSession()->GetAccountId());
+    return collection != collectionCache.end() && collection->second.contains(entry);
+}
+
+uint32 Transmogrification::GetPrice(ItemTemplate const* target) const
+{
+    return target ? TransmogCost(GetSpecialPrice(target), ScaledCostModifier, CopperCost) : 0;
+}
+
+uint32 Transmogrification::GetSetPrice(slotMap const& entries) const
+{
+    uint64 base = 0;
+    for (auto const& [slot, entry] : entries)
+        if (entry != HIDDEN_ITEM_ID)
+            if (ItemTemplate const* proto = sObjectMgr->GetItemTemplate(entry))
+                base += GetSpecialPrice(proto);
+    return TransmogCost(base, SetCostModifier, SetCopperCost);
+}
+
+TransmogStrings Transmogrification::Transmogrify(Player* player, uint32 itemEntry, uint8 slot, bool no_cost)
+{
+    if (itemEntry == UINT_MAX)
+        itemEntry = HIDDEN_ITEM_ID;
+    if (!HasAppearance(player, itemEntry))
+        return LANG_TRANSMOG_MISSING_SRC_ITEM;
+    Item* source = !GetUseCollectionSystem() && itemEntry != HIDDEN_ITEM_ID ? FindAppearanceSource(player, itemEntry) : nullptr;
+    return ApplyAppearance(player, itemEntry, slot, no_cost, source);
+}
+
+TransmogStrings Transmogrification::Transmogrify(Player* player, ObjectGuid itemGUID, uint8 slot, bool no_cost)
+{
+    Item* source = itemGUID ? player->GetItemByGuid(itemGUID) : nullptr;
+    if (itemGUID && !source)
+        return LANG_TRANSMOG_MISSING_SRC_ITEM;
+    return Transmogrify(player, source, slot, no_cost);
+}
+
+TransmogStrings Transmogrification::Transmogrify(Player* player, Item* source, uint8 slot, bool no_cost, bool hidden_transmog)
+{
+    return ApplyAppearance(player, hidden_transmog ? HIDDEN_ITEM_ID : (source ? source->GetEntry() : 0), slot, no_cost, source);
+}
+
+TransmogStrings Transmogrification::ApplyAppearance(Player* player, uint32 entry, uint8 slot, bool no_cost, Item* source)
+{
+    if (!IsEnabled() || slot >= EQUIPMENT_SLOT_END)
         return LANG_TRANSMOG_INVALID_SLOT;
-    }
-
-    // transmogrified item
-    Item* itemTransmogrified = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
-    if (!itemTransmogrified)
-    {
-        //TC_LOG_DEBUG(LOG_FILTER_NETWORKIO, "WORLD: HandleTransmogrifyItems - Player (GUID: {}, name: {}) tried to transmogrify an invalid item in a valid slot (slot: {}).", player->GetGUIDLow(), player->GetName(), slot);
+    Item* target = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+    if (!target)
         return LANG_TRANSMOG_MISSING_DEST_ITEM;
-    }
-
-    if (hidden_transmog)
-    {
-        cost = GetSpecialPrice(itemTransmogrified->GetTemplate());
-        cost *= ScaledCostModifier;
-        cost += CopperCost;
-
-        if (!HiddenTransmogIsFree && cost)
-        {
-            if (cost < 0)
-                LOG_DEBUG("module", "Transmogrification::Transmogrify - {} ({}) transmogrification invalid cost (non negative, amount {}). Transmogrified {} with {}",
-                    player->GetName(), player->GetGUID().ToString(), -cost, itemTransmogrified->GetEntry(), itemTransmogrifier->GetEntry());
-            else
-            {
-                if (!player->HasEnoughMoney(cost))
-                    return LANG_TRANSMOG_NOT_ENOUGH_MONEY;
-                player->ModifyMoney(-cost, false);
-            }
-        }
-        SetFakeEntry(player, HIDDEN_ITEM_ID, slot, itemTransmogrified); // newEntry
+    bool hidden = entry == HIDDEN_ITEM_ID;
+    if (hidden && (!AllowHiddenTransmog || !GetSlotName(slot, player->GetSession())))
+        return LANG_TRANSMOG_INVALID_ITEMS;
+    if (source && source->GetOwnerGUID() != player->GetGUID())
+        return LANG_TRANSMOG_MISSING_SRC_ITEM;
+    if (entry > HIDDEN_ITEM_ID &&
+        !CanTransmogrifyItemWithItem(player, target->GetTemplate(), sObjectMgr->GetItemTemplate(entry)))
+        return LANG_TRANSMOG_INVALID_ITEMS;
+    if (GetFakeEntry(target->GetGUID()) == entry)
         return LANG_TRANSMOG_OK;
-    }
-
-    if (!itemTransmogrifier) // reset look newEntry
+    uint32 cost = (!no_cost && (entry > HIDDEN_ITEM_ID || (hidden && !HiddenTransmogIsFree))) ? GetPrice(target->GetTemplate()) : 0;
+    bool payTokens = entry > HIDDEN_ITEM_ID && !no_cost && RequireToken;
+    if (!player->HasEnoughMoney(cost))
+        return LANG_TRANSMOG_NOT_ENOUGH_MONEY;
+    if (payTokens && !player->HasItemCount(TokenEntry, TokenAmount))
+        return LANG_TRANSMOG_NOT_ENOUGH_TOKENS;
+    // Token configuration may name an equipped/source item. Do not retain its pointer across destruction.
+    if (payTokens && (target->GetEntry() == TokenEntry || (source && source->GetEntry() == TokenEntry)))
+        return LANG_TRANSMOG_INVALID_ITEMS;
+    if (payTokens)
+        player->DestroyItemCount(TokenEntry, TokenAmount, true);
+    player->ModifyMoney(-static_cast<int32>(cost), false);
+    auto transaction = CharacterDatabase.BeginTransaction();
+    if (entry)
     {
-        // Custom
-        DeleteFakeEntry(player, slot, itemTransmogrified);
+        SetFakeEntry(player, entry, slot, target, &transaction);
+        target->UpdatePlayedTime(player);
+        target->SetNotRefundable(player, true, &transaction);
+        target->ClearSoulboundTradeable(player);
     }
     else
+        DeleteFakeEntry(player, slot, target, &transaction);
+    if (source)
     {
-        if (!CanTransmogrifyItemWithItem(player, itemTransmogrified->GetTemplate(), itemTransmogrifier->GetTemplate()))
-        {
-            //TC_LOG_DEBUG(LOG_FILTER_NETWORKIO, "WORLD: HandleTransmogrifyItems - Player (GUID: {}, name: {}) failed CanTransmogrifyItemWithItem ({} with {}).", player->GetGUIDLow(), player->GetName(), itemTransmogrified->GetEntry(), itemTransmogrifier->GetEntry());
-            return LANG_TRANSMOG_INVALID_ITEMS;
-        }
-
-        if (!no_cost)
-        {
-            if (RequireToken)
-            {
-                if (player->HasItemCount(TokenEntry, TokenAmount))
-                    player->DestroyItemCount(TokenEntry, TokenAmount, true);
-                else
-                    return LANG_TRANSMOG_NOT_ENOUGH_TOKENS;
-            }
-
-            cost = GetSpecialPrice(itemTransmogrified->GetTemplate());
-            cost *= ScaledCostModifier;
-            cost += CopperCost;
-
-            if (cost) // 0 cost if reverting look
-            {
-                if (cost < 0)
-                    LOG_DEBUG("module", "Transmogrification::Transmogrify - {} ({}) transmogrification invalid cost (non negative, amount {}). Transmogrified {} with {}",
-                        player->GetName(), player->GetGUID().ToString(), -cost, itemTransmogrified->GetEntry(), itemTransmogrifier->GetEntry());
-                else
-                {
-                    if (!player->HasEnoughMoney(cost))
-                        return LANG_TRANSMOG_NOT_ENOUGH_MONEY;
-                    player->ModifyMoney(-cost, false);
-                }
-            }
-        }
-
-        // Custom
-        SetFakeEntry(player, itemTransmogrifier->GetEntry(), slot, itemTransmogrified); // newEntry
-
-        itemTransmogrified->UpdatePlayedTime(player);
-
-        itemTransmogrified->SetOwnerGUID(player->GetGUID());
-        itemTransmogrified->SetNotRefundable(player);
-        itemTransmogrified->ClearSoulboundTradeable(player);
-
-        if (itemTransmogrifier->GetTemplate()->Bonding == BIND_WHEN_EQUIPPED || itemTransmogrifier->GetTemplate()->Bonding == BIND_WHEN_USE)
-            itemTransmogrifier->SetBinding(true);
-
-        itemTransmogrifier->SetOwnerGUID(player->GetGUID());
-        itemTransmogrifier->SetNotRefundable(player);
-        itemTransmogrifier->ClearSoulboundTradeable(player);
+        if (source->GetTemplate()->Bonding == BIND_WHEN_EQUIPPED || source->GetTemplate()->Bonding == BIND_WHEN_USE)
+            source->SetBinding(true);
+        source->SetNotRefundable(player, true, &transaction);
+        source->ClearSoulboundTradeable(player);
+        source->SetState(ITEM_CHANGED, player);
     }
-
+    player->SaveInventoryAndGoldToDB(transaction);
+    CharacterDatabase.CommitTransaction(transaction);
     return LANG_TRANSMOG_OK;
 }
 
@@ -1169,6 +1143,9 @@ void Transmogrification::LoadConfig(bool reload)
     EnableTransmogInfo = sConfigMgr->GetOption<bool>("Transmogrification.EnableTransmogInfo", true);
     TransmogNpcText = uint32(sConfigMgr->GetOption<uint32>("Transmogrification.TransmogNpcText", 601083));
 
+    Allowed.clear();
+    NotAllowed.clear();
+    TransmogAddon::OnConfigReload();
     std::istringstream issAllowed(sConfigMgr->GetOption<std::string>("Transmogrification.Allowed", ""));
     std::istringstream issNotAllowed(sConfigMgr->GetOption<std::string>("Transmogrification.NotAllowed", ""));
     while (issAllowed.good())
@@ -1189,7 +1166,7 @@ void Transmogrification::LoadConfig(bool reload)
     }
 
     ScaledCostModifier = sConfigMgr->GetOption<float>("Transmogrification.ScaledCostModifier", 1.0f);
-    CopperCost = sConfigMgr->GetOption<uint32>("Transmogrification.CopperCost", 0);
+    CopperCost = sConfigMgr->GetOption<int32>("Transmogrification.CopperCost", 0);
 
     RequireToken = sConfigMgr->GetOption<bool>("Transmogrification.RequireToken", false);
     TokenEntry = sConfigMgr->GetOption<uint32>("Transmogrification.TokenEntry", 49426);

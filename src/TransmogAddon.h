@@ -11,6 +11,7 @@ namespace TransmogAddon
 bool TryOpen(Player* player, Creature* creature);
 bool HandleMessage(Player* player, std::string const& message);
 void OnLogout(Player* player);
+void OnConfigReload();
 }
 
 #endif

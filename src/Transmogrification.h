@@ -324,8 +324,12 @@ public:
     // Adds the item's appearance to the player's account collection and, if newly unlocked,
     // notifies the player (LANG_TRANSMOG_ADDED_APPEARANCE). Shared by the auto-collect player
     // script and the `.transmog claim` command.
-    void AddToDatabase(Player* player, ItemTemplate const* itemTemplate);
-    ClaimAppearanceResult ClaimAppearance(Player* player, Item* item, ClaimAppearanceMode mode);
+    void AddToDatabase(Player* player, ItemTemplate const* itemTemplate, CharacterDatabaseTransaction* trans = nullptr);
+    ClaimAppearanceResult ClaimAppearance(Player* player, Item* item, ClaimAppearanceMode mode, CharacterDatabaseTransaction* trans = nullptr);
+    bool HasAppearance(Player* player, uint32 entry) const;
+    Item* FindAppearanceSource(Player* player, uint32 entry) const;
+    uint32 GetPrice(ItemTemplate const* target) const;
+    uint32 GetSetPrice(slotMap const& entries) const;
 
     TransmogStrings Transmogrify(Player* player, ObjectGuid itemGUID, uint8 slot, /*uint32 newEntry, */bool no_cost = false);
     TransmogStrings Transmogrify(Player* player, uint32 itemEntry, uint8 slot, /*uint32 newEntry, */bool no_cost = false);
@@ -387,6 +391,8 @@ public:
     uint32 PetSpellId;
     uint32 PetEntry;
     [[nodiscard]] bool IsTransmogVendor(uint32 entry) const { return entry == TMOG_VENDOR_CREATURE_ID || entry == PetEntry; };
+private:
+    TransmogStrings ApplyAppearance(Player* player, uint32 entry, uint8 slot, bool no_cost, Item* source);
 };
 #define sTransmogrification Transmogrification::instance()
 

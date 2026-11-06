@@ -13,6 +13,7 @@
 #include "WorldPacket.h"
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <limits>
 #include <map>
@@ -25,7 +26,7 @@
 namespace
 {
 constexpr std::string_view AddonPrefix = "AC_TRANSMOG";
-constexpr uint32 ProtocolVersion = 5;
+constexpr uint32 ProtocolVersion = 6;
 constexpr uint32 MinListIntervalMs = 150;
 constexpr uint32 MinOperationIntervalMs = 500;
 constexpr std::size_t ItemsPerChunk = 20;
@@ -38,6 +39,10 @@ struct ClientState
     uint64 lastListAtMs = 0;
     uint64 lastOperationAtMs = 0;
     std::unordered_set<uint32> completedOperations;
+    std::array<ObjectGuid, EQUIPMENT_SLOT_END> equipment;
+    uint32 quoteId = 0;
+    std::string listKey;
+    std::vector<uint32> listEntries;
 };
 
 std::unordered_map<ObjectGuid, ClientState> Clients;
@@ -111,20 +116,6 @@ bool ParseUnsigned(std::string const& value, T& result)
     return true;
 }
 
-uint32 GetPrice(ItemTemplate const* target)
-{
-    if (!target)
-        return 0;
-
-    double value = sTransmogrification->GetSpecialPrice(target) * sTransmogrification->GetScaledCostModifier();
-    value += sTransmogrification->GetCopperCost();
-    if (value <= 0)
-        return 0;
-    if (value >= std::numeric_limits<uint32>::max())
-        return std::numeric_limits<uint32>::max();
-    return static_cast<uint32>(value);
-}
-
 bool ValidateSession(Player* player, uint32 sessionId, ClientState*& state)
 {
     if (!sTransmogrification->IsEnabled())
@@ -150,21 +141,37 @@ void SendError(Player* player, uint32 requestId, std::string_view error)
 
 void SendSlotStates(Player* player)
 {
-    std::ostringstream states;
-    bool first = true;
+    auto& state = Clients[player->GetGUID()];
+    ++state.quoteId;
+    Send(player, "STATE_BEGIN\t" + std::to_string(state.sessionId) + "\t" + std::to_string(state.quoteId) + "\t" +
+        std::to_string(sTransmogrification->GetRequireToken() ? sTransmogrification->GetTokenEntry() : 0) + "\t" +
+        std::to_string(sTransmogrification->GetTokenAmount()));
     for (uint8 slot = 0; slot < EQUIPMENT_SLOT_END; ++slot)
     {
         Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
-        uint32 fakeEntry = item ? sTransmogrification->GetFakeEntry(item->GetGUID()) : 0;
-        if (!fakeEntry)
-            continue;
-
-        if (!first)
-            states << ',';
-        states << uint32(slot) << ':' << fakeEntry;
-        first = false;
+        state.equipment[slot] = item ? item->GetGUID() : ObjectGuid::Empty;
+        uint32 fake = item ? sTransmogrification->GetFakeEntry(item->GetGUID()) : 0;
+        uint32 price = item ? sTransmogrification->GetPrice(item->GetTemplate()) : 0;
+        Send(player, "EQUIP\t" + std::to_string(state.sessionId) + "\t" + std::to_string(slot) + "\t" +
+            std::to_string(price) + "\t" + std::to_string(fake) + "\t" +
+            std::to_string(item ? item->GetEntry() : 0) + "\t" +
+            std::to_string(sTransmogrification->GetHiddenTransmogIsFree() ? 0 : price));
     }
-    Send(player, "SLOTS\t" + states.str());
+    Send(player, "STATE_END\t" + std::to_string(state.sessionId));
+}
+
+bool ValidateEquipment(Player* player, ClientState const& state, std::string const& encodedQuote)
+{
+    uint32 quoteId = 0;
+    if (!ParseUnsigned(encodedQuote, quoteId) || quoteId != state.quoteId)
+        return false;
+    for (uint8 slot = 0; slot < EQUIPMENT_SLOT_END; ++slot)
+    {
+        Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+        if (state.equipment[slot] != (item ? item->GetGUID() : ObjectGuid::Empty))
+            return false;
+    }
+    return true;
 }
 
 bool NormalizeSetName(std::string const& value, std::string& normalized)
@@ -199,7 +206,7 @@ bool ParseSetEntries(std::string const& encoded, Transmogrification::slotMap& en
         uint32 itemEntry = 0;
         if (separator == std::string::npos || value.find(':', separator + 1) != std::string::npos ||
             !ParseUnsigned(value.substr(0, separator), slot) || !ParseUnsigned(value.substr(separator + 1), itemEntry) ||
-            slot >= EQUIPMENT_SLOT_END || itemEntry <= HIDDEN_ITEM_ID || entries.contains(static_cast<uint8>(slot)))
+            slot >= EQUIPMENT_SLOT_END || !itemEntry || entries.contains(static_cast<uint8>(slot)))
             return false;
         entries[static_cast<uint8>(slot)] = itemEntry;
     }
@@ -212,7 +219,7 @@ std::string EncodeSetEntries(Transmogrification::slotMap const& entries, char pa
     bool first = true;
     for (auto const& [slot, itemEntry] : entries)
     {
-        if (itemEntry <= HIDDEN_ITEM_ID)
+        if (!itemEntry)
             continue;
         if (!first)
             encoded << pairSeparator;
@@ -280,7 +287,7 @@ bool BeginSetOperation(Player* player, uint32 requestId, uint32 sessionId, Clien
     return true;
 }
 
-bool OpenSession(Player* player)
+bool OpenSession(Player* player, uint32 requestId = 0)
 {
     if (!IsEnabled() || !sTransmogrification->IsEnabled() || !sTransmogrification->GetUseCollectionSystem())
         return false;
@@ -296,7 +303,7 @@ bool OpenSession(Player* player)
     state.expiresAtMs = NowMs() + GetSessionTtlMs();
     // Keep throttles across sessions; old requests are rejected by session ID.
     state.completedOperations.clear();
-    Send(player, "OPEN\t" + std::to_string(state.sessionId));
+    Send(player, "OPEN\t" + std::to_string(state.sessionId) + "\t" + std::to_string(requestId));
     SendSlotStates(player);
     return true;
 }
@@ -384,42 +391,66 @@ void HandleList(Player* player, std::vector<std::string> const& parts)
         return;
     }
 
-    struct Appearance
+    std::ostringstream key;
+    key << target->GetGUID().GetRawValue() << ':' << uint32(slot) << ':' << uint32(quality) << ':'
+        << player->GetLevel() << ':' << uint32(player->getRace()) << ':' << uint32(player->getClass()) << ':'
+        << player->IsGameMaster() << ':' << uint32(player->GetActiveSpec()) << ':'
+        << player->GetSession()->GetSessionDbLocaleIndex() << ':'
+        << sTransmogrification->GetPlayerMembershipLevel(player) << ':';
+    for (uint16 index = PLAYER_SKILL_INFO_1_1; index < PLAYER_CHARACTER_POINTS1; ++index)
+        key << player->GetUInt32Value(index) << ',';
+    for (auto const& [spell, data] : player->GetSpellMap())
+        key << spell << ':' << uint32(data->State) << ':' << uint32(data->Active) << ':' << uint32(data->specMask) << ',';
+    for (auto event : sGameEventMgr->GetActiveEventList())
+        key << event << ',';
+    auto owned = sTransmogrification->collectionCache.find(player->GetSession()->GetAccountId());
+    key << ':' << (owned == sTransmogrification->collectionCache.end() ? 0 : owned->second.size()) << ':' << (parts.size() > 5 ? parts[5] : "");
+    std::string cacheKey = key.str();
+    if (state->listKey != cacheKey)
     {
-        ItemTemplate const* item;
-        std::string name;
-    };
-
-    std::vector<Appearance> appearances;
-    uint32 accountId = player->GetSession()->GetAccountId();
-    auto collection = sTransmogrification->collectionCache.find(accountId);
-    if (collection != sTransmogrification->collectionCache.end())
-    {
-        for (uint32 itemEntry : collection->second)
+        struct Appearance
         {
-            ItemTemplate const* appearance = sObjectMgr->GetItemTemplate(itemEntry);
-            if (!appearance || (quality != 255 && appearance->Quality != quality))
-                continue;
-            if (!sTransmogrification->CanTransmogrifyItemWithItem(player, target->GetTemplate(), appearance))
-                continue;
+            ItemTemplate const* item;
+            std::string name;
+        };
 
-            std::string localizedName = appearance->Name1;
-            if (ItemLocale const* locale = sObjectMgr->GetItemLocale(itemEntry))
-                ObjectMgr::GetLocaleString(locale->Name, player->GetSession()->GetSessionDbLocaleIndex(), localizedName);
-            if (!search.empty() && !Utf8FitTo(localizedName, search))
-                continue;
-            appearances.push_back({ appearance, std::move(localizedName) });
+        std::vector<Appearance> appearances;
+        uint32 accountId = player->GetSession()->GetAccountId();
+        auto collection = sTransmogrification->collectionCache.find(accountId);
+        if (collection != sTransmogrification->collectionCache.end())
+        {
+            for (uint32 itemEntry : collection->second)
+            {
+                ItemTemplate const* appearance = sObjectMgr->GetItemTemplate(itemEntry);
+                if (!appearance || (quality != 255 && appearance->Quality != quality))
+                    continue;
+                if (!sTransmogrification->CanTransmogrifyItemWithItem(player, target->GetTemplate(), appearance))
+                    continue;
+
+                std::string localizedName = appearance->Name1;
+                if (ItemLocale const* locale = sObjectMgr->GetItemLocale(itemEntry))
+                    ObjectMgr::GetLocaleString(locale->Name, player->GetSession()->GetSessionDbLocaleIndex(), localizedName);
+                if (!search.empty() && !Utf8FitTo(localizedName, search))
+                    continue;
+                appearances.push_back({ appearance, std::move(localizedName) });
+            }
         }
-    }
 
-    std::sort(appearances.begin(), appearances.end(), [](Appearance const& left, Appearance const& right)
-    {
-        if (left.item->Quality != right.item->Quality)
-            return left.item->Quality > right.item->Quality;
-        if (left.name != right.name)
-            return left.name < right.name;
-        return left.item->ItemId < right.item->ItemId;
-    });
+        std::sort(appearances.begin(), appearances.end(), [](Appearance const& left, Appearance const& right)
+        {
+            if (left.item->Quality != right.item->Quality)
+                return left.item->Quality > right.item->Quality;
+            if (left.name != right.name)
+                return left.name < right.name;
+            return left.item->ItemId < right.item->ItemId;
+        });
+
+        state->listEntries.clear();
+        for (auto const& appearance : appearances)
+            state->listEntries.push_back(appearance.item->ItemId);
+        state->listKey = std::move(cacheKey);
+    }
+    auto const& appearances = state->listEntries;
 
     uint32 pageSize = GetPageSize();
     uint32 total = appearances.size();
@@ -430,7 +461,7 @@ void HandleList(Player* player, std::vector<std::string> const& parts)
     uint32 current = sTransmogrification->GetFakeEntry(target->GetGUID());
     Send(player, "PAGE\t" + std::to_string(requestId) + "\t" + std::to_string(slot) + "\t" +
         std::to_string(page) + "\t" + std::to_string(pageCount) + "\t" + std::to_string(total) + "\t" +
-        std::to_string(GetPrice(target->GetTemplate())) + "\t" + std::to_string(current) + "\t" +
+        std::to_string(sTransmogrification->GetPrice(target->GetTemplate())) + "\t" + std::to_string(current) + "\t" +
         std::to_string(target->GetEntry()));
 
     std::size_t begin = std::size_t(page) * pageSize;
@@ -445,7 +476,7 @@ void HandleList(Player* player, std::vector<std::string> const& parts)
         {
             if (index != chunkBegin)
                 entries << ',';
-            entries << appearances[index].item->ItemId;
+            entries << appearances[index];
         }
         Send(player, "ITEMS\t" + std::to_string(requestId) + "\t" + std::to_string(chunk) + "\t" +
             std::to_string(chunks) + "\t" + entries.str());
@@ -466,6 +497,13 @@ void HandleApply(Player* player, std::vector<std::string> const& parts)
     if (!ValidateSession(player, sessionId, state))
     {
         SendError(player, requestId, "SESSION");
+        return;
+    }
+
+    if (parts.size() <= 5 || !ValidateEquipment(player, *state, parts[5]))
+    {
+        SendError(player, requestId, "EQUIPMENT_CHANGED");
+        SendSlotStates(player);
         return;
     }
 
@@ -522,6 +560,13 @@ void HandleApplyOutfit(Player* player, std::vector<std::string> const& parts)
     if (!ValidateSession(player, sessionId, state))
     {
         SendError(player, requestId, "SESSION");
+        return;
+    }
+
+    if (parts.size() <= 4 || !ValidateEquipment(player, *state, parts[4]))
+    {
+        SendError(player, requestId, "EQUIPMENT_CHANGED");
+        SendSlotStates(player);
         return;
     }
 
@@ -599,6 +644,21 @@ void HandleApplyOutfit(Player* player, std::vector<std::string> const& parts)
             continue;
         }
 
+        if (change.itemEntry == HIDDEN_ITEM_ID)
+        {
+            if (!sTransmogrification->GetAllowHiddenTransmog() || !sTransmogrification->GetSlotName(change.slot, player->GetSession()))
+            {
+                SendError(player, requestId, "TRANSMOG_6");
+                return;
+            }
+            if (sTransmogrification->GetFakeEntry(change.target->GetGUID()) != HIDDEN_ITEM_ID)
+            {
+                if (!sTransmogrification->GetHiddenTransmogIsFree())
+                    totalCost += sTransmogrification->GetPrice(change.target->GetTemplate());
+                preparedChanges.push_back(change);
+            }
+            continue;
+        }
         ItemTemplate const* appearance = sObjectMgr->GetItemTemplate(change.itemEntry);
         if (!appearance || collection == sTransmogrification->collectionCache.end() ||
             !collection->second.contains(change.itemEntry))
@@ -615,7 +675,7 @@ void HandleApplyOutfit(Player* player, std::vector<std::string> const& parts)
         if (sTransmogrification->GetFakeEntry(change.target->GetGUID()) == change.itemEntry)
             continue;
 
-        totalCost += GetPrice(change.target->GetTemplate());
+        totalCost += sTransmogrification->GetPrice(change.target->GetTemplate());
         ++paidChangeCount;
         preparedChanges.push_back(change);
     }
@@ -628,16 +688,23 @@ void HandleApplyOutfit(Player* player, std::vector<std::string> const& parts)
         SendError(player, requestId, "TRANSMOG_8");
         return;
     }
-    if (player->GetMoney() < totalCost)
+    if (totalCost > std::numeric_limits<int32>::max() || player->GetMoney() < totalCost)
     {
         SendError(player, requestId, "TRANSMOG_7");
         return;
     }
 
     if (sTransmogrification->GetRequireToken() && requiredTokens)
+        for (auto const& change : preparedChanges)
+            if (change.target->GetEntry() == sTransmogrification->GetTokenEntry())
+            {
+                SendError(player, requestId, "TRANSMOG_6");
+                return;
+            }
+    if (sTransmogrification->GetRequireToken() && requiredTokens)
         player->DestroyItemCount(sTransmogrification->GetTokenEntry(), static_cast<uint32>(requiredTokens), true);
     if (totalCost)
-        player->ModifyMoney(-static_cast<int64>(totalCost), false);
+        player->ModifyMoney(-static_cast<int32>(totalCost), false);
 
     auto transaction = CharacterDatabase.BeginTransaction();
     for (OutfitChange const& change : preparedChanges)
@@ -647,14 +714,17 @@ void HandleApplyOutfit(Player* player, std::vector<std::string> const& parts)
             sTransmogrification->SetFakeEntry(player, change.itemEntry, change.slot, change.target, &transaction);
             change.target->UpdatePlayedTime(player);
             change.target->SetOwnerGUID(player->GetGUID());
-            change.target->SetNotRefundable(player);
+            change.target->SetNotRefundable(player, true, &transaction);
             change.target->ClearSoulboundTradeable(player);
         }
         else
             sTransmogrification->DeleteFakeEntry(player, change.slot, change.target, &transaction);
     }
     if (!preparedChanges.empty())
+    {
+        player->SaveInventoryAndGoldToDB(transaction);
         CharacterDatabase.CommitTransaction(transaction);
+    }
 
     state->completedOperations.insert(requestId);
     state->lastListAtMs = 0;
@@ -676,6 +746,13 @@ void HandleRemove(Player* player, std::vector<std::string> const& parts)
     if (!ValidateSession(player, sessionId, state))
     {
         SendError(player, requestId, "SESSION");
+        return;
+    }
+
+    if (parts.size() <= 4 || !ValidateEquipment(player, *state, parts[4]))
+    {
+        SendError(player, requestId, "EQUIPMENT_CHANGED");
+        SendSlotStates(player);
         return;
     }
 
@@ -724,6 +801,13 @@ void HandleRemoveAll(Player* player, std::vector<std::string> const& parts)
     if (!ValidateSession(player, sessionId, state))
     {
         SendError(player, requestId, "SESSION");
+        return;
+    }
+
+    if (parts.size() <= 3 || !ValidateEquipment(player, *state, parts[3]))
+    {
+        SendError(player, requestId, "EQUIPMENT_CHANGED");
+        SendSlotStates(player);
         return;
     }
 
@@ -822,15 +906,11 @@ void HandleSaveSet(Player* player, std::vector<std::string> const& parts)
         }
     }
 
-    auto collection = sTransmogrification->collectionCache.find(player->GetSession()->GetAccountId());
-    if (collection == sTransmogrification->collectionCache.end())
-    {
-        SendSetResult(player, requestId, "ERROR", "NOT_COLLECTED");
-        return;
-    }
     for (auto const& [slot, itemEntry] : entries)
     {
-        if (!sObjectMgr->GetItemTemplate(itemEntry) || !collection->second.contains(itemEntry))
+        if (!sTransmogrification->HasAppearance(player, itemEntry) ||
+            (itemEntry != HIDDEN_ITEM_ID && !sObjectMgr->GetItemTemplate(itemEntry)) ||
+            !sTransmogrification->GetSlotName(slot, player->GetSession()))
         {
             SendSetResult(player, requestId, "ERROR", "NOT_COLLECTED");
             return;
@@ -846,12 +926,22 @@ void HandleSaveSet(Player* player, std::vector<std::string> const& parts)
         return;
     }
 
+    uint32 cost = sTransmogrification->GetSetPrice(entries);
+    if (!player->HasEnoughMoney(cost))
+    {
+        SendSetResult(player, requestId, "ERROR", "TRANSMOG_7");
+        return;
+    }
     std::string databaseName = name;
     CharacterDatabase.EscapeString(databaseName);
     std::string databaseData = EncodeSetEntries(entries, ' ', ' ');
-    CharacterDatabase.Execute(
+    auto transaction = CharacterDatabase.BeginTransaction();
+    transaction->Append(
         "REPLACE INTO `custom_transmogrification_sets` (`Owner`, `PresetID`, `SetName`, `SetData`) VALUES ({}, {}, '{}', '{}')",
         playerGuid.GetCounter(), uint32(presetId), databaseName, databaseData);
+    player->ModifyMoney(-static_cast<int32>(cost), false);
+    player->SaveInventoryAndGoldToDB(transaction);
+    CharacterDatabase.CommitTransaction(transaction);
     sTransmogrification->presetByName[playerGuid][presetId] = name;
     sTransmogrification->presetById[playerGuid][presetId] = entries;
 
@@ -957,11 +1047,32 @@ bool HandleMessage(Player* player, std::string const& message)
     if (parts.empty())
         return true;
 
+    if (!IsEnabled() && parts[0] != "HELLO" && parts[0] != "CLOSE")
+    {
+        uint32 requestId = 0;
+        if (parts.size() > 1)
+            ParseUnsigned(parts[1], requestId);
+        SendError(player, requestId, "UNAVAILABLE");
+        return true;
+    }
+    if (parts[0] == "STATE")
+    {
+        uint32 sessionId = 0;
+        ClientState* state = nullptr;
+        if (parts.size() > 1 && ParseUnsigned(parts[1], sessionId) && ValidateSession(player, sessionId, state))
+            SendSlotStates(player);
+        else
+            SendError(player, 0, "SESSION");
+        return true;
+    }
     if (parts[0] == "HELLO")
         HandleHello(player, parts);
     else if (parts[0] == "OPEN")
     {
-        if (!OpenSession(player))
+        uint32 requestId = 0;
+        if (parts.size() < 2 || !ParseUnsigned(parts[1], requestId))
+            return true;
+        if (!OpenSession(player, requestId))
             SendError(player, 0, "UNAVAILABLE");
     }
     else if (parts[0] == "LIST" && IsEnabled())
@@ -985,11 +1096,17 @@ bool HandleMessage(Player* player, std::string const& message)
     else if (parts[0] == "CLOSE")
     {
         auto client = Clients.find(player->GetGUID());
-        if (client != Clients.end())
+        uint32 sessionId = 0;
+        if (client != Clients.end() && parts.size() > 1 && ParseUnsigned(parts[1], sessionId) && client->second.sessionId == sessionId)
             client->second.sessionId = 0;
     }
 
     return true;
+}
+
+void OnConfigReload()
+{
+    Clients.clear();
 }
 
 void OnLogout(Player* player)
