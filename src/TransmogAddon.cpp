@@ -35,6 +35,7 @@ struct ClientState
 {
     bool compatible = false;
     uint32 sessionId = 0;
+    uint32 generation = 0;
     uint64 expiresAtMs = 0;
     uint64 lastListAtMs = 0;
     uint64 lastOperationAtMs = 0;
@@ -303,7 +304,7 @@ bool OpenSession(Player* player, uint32 requestId = 0)
     state.expiresAtMs = NowMs() + GetSessionTtlMs();
     // Keep throttles across sessions; old requests are rejected by session ID.
     state.completedOperations.clear();
-    Send(player, "OPEN\t" + std::to_string(state.sessionId) + "\t" + std::to_string(requestId));
+    Send(player, "OPEN\t" + std::to_string(state.sessionId) + "\t" + std::to_string(requestId) + "\t" + std::to_string(state.generation));
     SendSlotStates(player);
     return true;
 }
@@ -311,7 +312,8 @@ bool OpenSession(Player* player, uint32 requestId = 0)
 void HandleHello(Player* player, std::vector<std::string> const& parts)
 {
     uint32 version = 0;
-    if (parts.size() < 2 || !ParseUnsigned(parts[1], version) || version != ProtocolVersion || !IsEnabled())
+    uint32 generation = 0;
+    if (parts.size() < 3 || !ParseUnsigned(parts[2], generation) || !ParseUnsigned(parts[1], version) || version != ProtocolVersion || !IsEnabled())
     {
         Clients.erase(player->GetGUID());
         Send(player, "HELLO_ERROR\t" + std::to_string(ProtocolVersion));
@@ -320,6 +322,7 @@ void HandleHello(Player* player, std::vector<std::string> const& parts)
 
     ClientState& state = Clients[player->GetGUID()];
     state.compatible = true;
+    state.generation = generation;
     Send(player, "HELLO_OK\t" + std::to_string(ProtocolVersion));
 }
 
@@ -1050,7 +1053,7 @@ bool HandleMessage(Player* player, std::string const& message)
     if (!IsEnabled() && parts[0] != "HELLO" && parts[0] != "CLOSE")
     {
         uint32 requestId = 0;
-        if (parts.size() > 1)
+        if (parts[0] != "STATE" && parts[0] != "OPEN" && parts.size() > 1)
             ParseUnsigned(parts[1], requestId);
         SendError(player, requestId, "UNAVAILABLE");
         return true;
@@ -1097,8 +1100,14 @@ bool HandleMessage(Player* player, std::string const& message)
     {
         auto client = Clients.find(player->GetGUID());
         uint32 sessionId = 0;
-        if (client != Clients.end() && parts.size() > 1 && ParseUnsigned(parts[1], sessionId) && client->second.sessionId == sessionId)
-            client->second.sessionId = 0;
+        uint32 generation = 0;
+        if (client != Clients.end() && parts.size() > 2 && ParseUnsigned(parts[1], sessionId) &&
+            ParseUnsigned(parts[2], generation) && generation >= client->second.generation)
+        {
+            client->second.generation = generation;
+            if (client->second.sessionId == sessionId)
+                client->second.sessionId = 0;
+        }
     }
 
     return true;
